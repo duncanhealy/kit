@@ -1,5 +1,17 @@
 # @sveltejs/kit
 
+## 1.0.0-next.45
+
+### Minor Changes
+
+- 925638a: Remove endpoints from the files built for the client
+
+### Patch Changes
+
+- c3cf3f3: Bump deps
+- Updated dependencies [c3cf3f3]
+  - @sveltejs/vite-plugin-svelte@1.0.0-next.3
+
 ## 1.0.0-next.44
 
 ### Patch Changes
