@@ -1,8 +1,16 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { dirname, join, resolve as resolve_path } from 'path';
-import { parse, pathToFileURL, resolve } from 'url';
-import { mkdirp } from '../filesystem/index.js';
-import '../../install-fetch.js';
+import { pathToFileURL, resolve, URL } from 'url';
+import { mkdirp } from '../../utils/filesystem.js';
+import { __fetch_polyfill } from '../../install-fetch.js';
+import { SVELTE_KIT } from '../constants.js';
+import { get_single_valued_header } from '../../utils/http.js';
+
+/**
+ * @typedef {import('types/config').PrerenderErrorHandler} PrerenderErrorHandler
+ * @typedef {import('types/config').PrerenderOnErrorValue} OnError
+ * @typedef {import('types/internal').Logger} Logger
+ */
 
 /** @param {string} html */
 function clean_html(html) {
@@ -14,22 +22,28 @@ function clean_html(html) {
 }
 
 /** @param {string} attrs */
-function get_href(attrs) {
-	const match = /href\s*=\s*(?:"(.*?)"|'(.*?)'|([^\s>]*))/.exec(attrs);
+export function get_href(attrs) {
+	const match = /(?:[\s'"]|^)href\s*=\s*(?:"(.*?)"|'(.*?)'|([^\s>]*))/.exec(attrs);
 	return match && (match[1] || match[2] || match[3]);
 }
 
 /** @param {string} attrs */
 function get_src(attrs) {
-	const match = /src\s*=\s*(?:"(.*?)"|'(.*?)'|([^\s>]*))/.exec(attrs);
+	const match = /(?:[\s'"]|^)src\s*=\s*(?:"(.*?)"|'(.*?)'|([^\s>]*))/.exec(attrs);
 	return match && (match[1] || match[2] || match[3]);
+}
+
+/** @param {string} attrs */
+export function is_rel_external(attrs) {
+	const match = /rel\s*=\s*(?:["'][^>]*(external)[^>]*["']|(external))/.exec(attrs);
+	return !!match;
 }
 
 /** @param {string} attrs */
 function get_srcset_urls(attrs) {
 	const results = [];
 	// Note that the srcset allows any ASCII whitespace, including newlines.
-	const match = /srcset\s*=\s*(?:"(.*?)"|'(.*?)'|([^\s>]*))/s.exec(attrs);
+	const match = /([\s'"]|^)srcset\s*=\s*(?:"(.*?)"|'(.*?)'|([^\s>]*))/s.exec(attrs);
 	if (match) {
 		const attr_content = match[1] || match[2] || match[3];
 		// Parse the content of the srcset attribute.
@@ -44,26 +58,55 @@ function get_srcset_urls(attrs) {
 	return results;
 }
 
+/** @type {(errorDetails: Parameters<PrerenderErrorHandler>[0] ) => string} */
+function errorDetailsToString({ status, path, referrer, referenceType }) {
+	return `${status} ${path}${referrer ? ` (${referenceType} from ${referrer})` : ''}`;
+}
+
+/** @type {(log: Logger, onError: OnError) => PrerenderErrorHandler} */
+function chooseErrorHandler(log, onError) {
+	switch (onError) {
+		case 'continue':
+			return (errorDetails) => {
+				log.error(errorDetailsToString(errorDetails));
+			};
+		case 'fail':
+			return (errorDetails) => {
+				throw new Error(errorDetailsToString(errorDetails));
+			};
+		default:
+			return onError;
+	}
+}
+
 const OK = 2;
 const REDIRECT = 3;
 
-/** @param {{
+/**
+ * @param {{
  *   cwd: string;
  *   out: string;
- *   log: import('types/internal').Logger;
+ *   log: Logger;
  *   config: import('types/config').ValidatedConfig;
  *   build_data: import('types/internal').BuildData;
- *   fallback: string;
+ *   fallback?: string;
  *   all: boolean; // disregard `export const prerender = true`
- * }} opts */
+ * }} opts
+ */
 export async function prerender({ cwd, out, log, config, build_data, fallback, all }) {
-	const dir = resolve_path(cwd, '.svelte/output');
+	if (!config.kit.prerender.enabled && !fallback) {
+		return;
+	}
+
+	__fetch_polyfill();
+
+	const dir = resolve_path(cwd, `${SVELTE_KIT}/output`);
 
 	const seen = new Set();
 
 	const server_root = resolve_path(dir);
 
-	/** @type {import('types/internal').App} */
+	/** @type {import('types/app').App} */
 	const app = await import(pathToFileURL(`${server_root}/server/app.js`).href);
 
 	app.init({
@@ -72,14 +115,7 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 		read: (file) => readFileSync(join(config.kit.files.assets, file))
 	});
 
-	/** @type {(status: number, path: string, parent: string, verb: string) => void} */
-	const error = config.kit.prerender.force
-		? (status, path, parent, verb) => {
-				log.error(`${status} ${path}${parent ? ` (${verb} from ${parent})` : ''}`);
-		  }
-		: (status, path, parent, verb) => {
-				throw new Error(`${status} ${path}${parent ? ` (${verb} from ${parent})` : ''}`);
-		  };
+	const error = chooseErrorHandler(log, config.kit.prerender.onError);
 
 	const files = new Set([...build_data.static, ...build_data.client]);
 
@@ -91,13 +127,28 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 
 	/**
 	 * @param {string} path
-	 * @param {string} parent
 	 */
-	async function visit(path, parent) {
+	function normalize(path) {
+		if (config.kit.trailingSlash === 'always') {
+			return path.endsWith('/') ? path : `${path}/`;
+		} else if (config.kit.trailingSlash === 'never') {
+			return !path.endsWith('/') || path === '/' ? path : path.slice(0, -1);
+		}
+
+		return path;
+	}
+
+	/**
+	 * @param {string} decoded_path
+	 * @param {string?} referrer
+	 */
+	async function visit(decoded_path, referrer) {
+		const path = encodeURI(normalize(decoded_path));
+
 		if (seen.has(path)) return;
 		seen.add(path);
 
-		/** @type {Map<string, import('types/endpoint').ServerResponse>} */
+		/** @type {Map<string, import('types/hooks').ServerResponse>} */
 		const dependencies = new Map();
 
 		const rendered = await app.render(
@@ -111,7 +162,6 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 			},
 			{
 				prerender: {
-					fallback: null,
 					all,
 					dependencies
 				}
@@ -124,7 +174,7 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 			const type = headers && headers['content-type'];
 			const is_html = response_type === REDIRECT || type === 'text/html';
 
-			const parts = path.split('/');
+			const parts = decoded_path.split('/');
 			if (is_html && parts[parts.length - 1] !== 'index.html') {
 				parts.push('index.html');
 			}
@@ -133,19 +183,23 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 			mkdirp(dirname(file));
 
 			if (response_type === REDIRECT) {
-				const { location } = headers;
+				const location = get_single_valued_header(headers, 'location');
 
-				log.warn(`${rendered.status} ${path} -> ${location}`);
-				writeFileSync(file, `<meta http-equiv="refresh" content="0;url=${encodeURI(location)}">`);
+				if (location) {
+					log.warn(`${rendered.status} ${decoded_path} -> ${location}`);
+					writeFileSync(file, `<meta http-equiv="refresh" content="0;url=${encodeURI(location)}">`);
+				} else {
+					log.warn(`location header missing on redirect received from ${decoded_path}`);
+				}
 
 				return;
 			}
 
 			if (rendered.status === 200) {
-				log.info(`${rendered.status} ${path}`);
-				writeFileSync(file, rendered.body); // TODO minify where possible?
+				log.info(`${rendered.status} ${decoded_path}`);
+				writeFileSync(file, rendered.body || '');
 			} else if (response_type !== OK) {
-				error(rendered.status, path, parent, 'linked');
+				error({ status: rendered.status, path, referrer, referenceType: 'linked' });
 			}
 
 			dependencies.forEach((result, dependency_path) => {
@@ -161,17 +215,22 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 				const file = `${out}${parts.join('/')}`;
 				mkdirp(dirname(file));
 
-				writeFileSync(file, result.body);
+				if (result.body) writeFileSync(file, result.body);
 
 				if (response_type === OK) {
 					log.info(`${result.status} ${dependency_path}`);
 				} else {
-					error(result.status, dependency_path, path, 'fetched');
+					error({
+						status: result.status,
+						path: dependency_path,
+						referrer: path,
+						referenceType: 'fetched'
+					});
 				}
 			});
 
 			if (is_html && config.kit.prerender.crawl) {
-				const cleaned = clean_html(rendered.body);
+				const cleaned = clean_html(/** @type {string} */ (rendered.body));
 
 				let match;
 				const pattern = /<(a|img|link|source)\s+([\s\S]+?)>/gm;
@@ -183,6 +242,8 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 					const attrs = match[2];
 
 					if (element === 'a' || element === 'link') {
+						if (is_rel_external(attrs)) continue;
+
 						hrefs.push(get_href(attrs));
 					} else {
 						if (element === 'img') {
@@ -196,30 +257,33 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 					if (!href) continue;
 
 					const resolved = resolve(path, href);
-					if (resolved[0] !== '/') continue;
+					if (!resolved.startsWith('/') || resolved.startsWith('//')) continue;
 
-					const parsed = parse(resolved);
+					const parsed = new URL(resolved, 'http://localhost');
+					const pathname = decodeURI(parsed.pathname).replace(config.kit.paths.base, '');
 
-					const file = parsed.pathname.replace(config.kit.paths.assets, '').slice(1);
+					const file = pathname.slice(1);
 					if (files.has(file)) continue;
 
-					if (parsed.query) {
+					if (parsed.search) {
 						// TODO warn that query strings have no effect on statically-exported pages
 					}
 
-					await visit(parsed.pathname.replace(config.kit.paths.base, ''), path);
+					await visit(pathname, path);
 				}
 			}
 		}
 	}
 
-	for (const entry of config.kit.prerender.pages) {
-		if (entry === '*') {
-			for (const entry of build_data.entries) {
+	if (config.kit.prerender.enabled) {
+		for (const entry of config.kit.prerender.entries) {
+			if (entry === '*') {
+				for (const entry of build_data.entries) {
+					await visit(entry, null);
+				}
+			} else {
 				await visit(entry, null);
 			}
-		} else {
-			await visit(entry, null);
 		}
 	}
 
@@ -236,14 +300,13 @@ export async function prerender({ cwd, out, log, config, build_data, fallback, a
 			{
 				prerender: {
 					fallback,
-					all: false,
-					dependencies: null
+					all: false
 				}
 			}
 		);
 
 		const file = join(out, fallback);
 		mkdirp(dirname(file));
-		writeFileSync(file, rendered.body);
+		writeFileSync(file, rendered.body || '');
 	}
 }

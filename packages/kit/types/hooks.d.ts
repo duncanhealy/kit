@@ -1,23 +1,36 @@
-import { BaseBody, Headers } from './helper';
-import { ServerRequest, ServerResponse } from './endpoint';
+import { IncomingRequest, ParameterizedBody } from './app';
+import { MaybePromise, ResponseHeaders } from './helper';
 
-export type Incoming = {
-	method: string;
-	host: string;
-	headers: Headers;
-	path: string;
-	query: URLSearchParams;
-	rawBody: string | ArrayBuffer;
-	body?: BaseBody;
-};
+export type StrictBody = string | Uint8Array;
 
-export type GetContext<Context = any> = (incoming: Incoming) => Context;
+export interface ServerRequest<Locals = Record<string, any>, Body = unknown>
+	extends IncomingRequest {
+	params: Record<string, string>;
+	body: ParameterizedBody<Body>;
+	locals: Locals;
+}
 
-export type GetSession<Context = any, Session = any> = {
-	({ context }: { context: Context }): Session | Promise<Session>;
-};
+export interface ServerResponse {
+	status: number;
+	headers: ResponseHeaders;
+	body?: StrictBody;
+}
 
-export type Handle<Context = any> = (input: {
-	request: ServerRequest<Context>;
-	render: (request: ServerRequest<Context>) => ServerResponse | Promise<ServerResponse>;
-}) => ServerResponse | Promise<ServerResponse>;
+export interface GetSession<Locals = Record<string, any>, Body = unknown, Session = any> {
+	(request: ServerRequest<Locals, Body>): MaybePromise<Session>;
+}
+
+export interface Handle<Locals = Record<string, any>, Body = unknown> {
+	(input: {
+		request: ServerRequest<Locals, Body>;
+		resolve(request: ServerRequest<Locals, Body>): MaybePromise<ServerResponse>;
+	}): MaybePromise<ServerResponse>;
+}
+
+export interface HandleError<Locals = Record<string, any>, Body = unknown> {
+	(input: { error: Error & { frame?: string }; request: ServerRequest<Locals, Body> }): void;
+}
+
+export interface ExternalFetch {
+	(req: Request): Promise<Response>;
+}

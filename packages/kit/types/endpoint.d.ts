@@ -1,23 +1,18 @@
-import { Headers, ParameterizedBody } from './helper';
+import { ServerRequest } from './hooks';
+import { JSONString, MaybePromise, ResponseHeaders } from './helper';
 
-export type ServerRequest<Context = any, Body = unknown> = {
-	method: string;
-	host: string;
-	headers: Headers;
-	path: string;
-	params: Record<string, string>;
-	query: URLSearchParams;
-	rawBody: string | ArrayBuffer;
-	body: ParameterizedBody<Body>;
-	context: Context;
-};
+type DefaultBody = JSONString | Uint8Array;
 
-export type ServerResponse = {
+export interface EndpointOutput<Body extends DefaultBody = DefaultBody> {
 	status?: number;
-	headers?: Headers;
-	body?: any;
-};
+	headers?: ResponseHeaders;
+	body?: Body;
+}
 
-export type RequestHandler<Context = any, Body = unknown> = (
-	request: ServerRequest<Context, Body>
-) => void | ServerResponse | Promise<ServerResponse>;
+export interface RequestHandler<
+	Locals = Record<string, any>,
+	Input = unknown,
+	Output extends DefaultBody = DefaultBody
+> {
+	(request: ServerRequest<Locals, Input>): MaybePromise<void | EndpointOutput<Output>>;
+}

@@ -4,37 +4,47 @@ title: Loading
 
 A component that defines a page or a layout can export a `load` function that runs before the component is created. This function runs both during server-side rendering and in the client, and allows you to get data for a page without (for example) showing a loading spinner and fetching data in `onMount`.
 
-Our example blog page might contain a `load` function like the following. Note the `context="module"` — this is necessary because `load` runs before the component is rendered:
-
 ```ts
-type LoadInput = {
+// Declaration types for Loading
+// * declarations that are not exported are for internal use
+
+export interface LoadInput<
+	PageParams extends Record<string, string> = Record<string, string>,
+	Stuff extends Record<string, any> = Record<string, any>,
+	Session = any
+> {
 	page: {
 		host: string;
 		path: string;
-		params: Record<string, string | string[]>;
+		params: PageParams;
 		query: URLSearchParams;
 	};
-	fetch: (info: RequestInfo, init?: RequestInit) => Promise<Response>;
-	session: any;
-	context: Record<string, any>;
-};
+	fetch(info: RequestInfo, init?: RequestInit): Promise<Response>;
+	session: Session;
+	stuff: Stuff;
+}
 
-type LoadOutput = {
+export interface LoadOutput<
+	Props extends Record<string, any> = Record<string, any>,
+	Stuff extends Record<string, any> = Record<string, any>
+> {
 	status?: number;
-	error?: Error;
+	error?: string | Error;
 	redirect?: string;
-	props?: Record<string, any>;
-	context?: Record<string, any>;
+	props?: Props;
+	stuff?: Stuff;
 	maxage?: number;
-};
+}
 ```
+
+Our example blog page might contain a `load` function like the following:
 
 ```html
 <script context="module">
 	/**
 	 * @type {import('@sveltejs/kit').Load}
 	 */
-	export async function load({ page, fetch, session, context }) {
+	export async function load({ page, fetch, session, stuff }) {
 		const url = `/blog/${page.params.slug}.json`;
 		const res = await fetch(url);
 
@@ -54,15 +64,33 @@ type LoadOutput = {
 </script>
 ```
 
+> Note the `<script context="module">` — this is necessary because `load` runs before the component is rendered. Code that is per-component instance should go into a second `<script>` tag.
+
 `load` is similar to `getStaticProps` or `getServerSideProps` in Next.js, except that it runs on both the server and the client.
 
 If `load` returns nothing, SvelteKit will [fall through](#routing-advanced-fallthrough-routes) to other routes until something responds, or will respond with a generic 404.
 
-> `load` only applies to components that define pages, not the components that they import.
+SvelteKit's `load` receives an implemention of `fetch`, which has the following special properties:
+
+- it has access to cookies on the server
+- it can make requests against the app's own endpoints without issuing an HTTP call
+- it makes a copy of the response when you use it, and then sends it embedded in the initial page load for hydration
+
+`load` only applies to [page](#routing-pages) and [layout](#layouts) components (not components they import), and runs on both the server and in the browser with the default rendering options.
+
+> Code called inside `load` blocks:
+>
+> - should use the SvelteKit-provided [`fetch`](#loading-input-fetch) wrapper rather than using the native `fetch`
+> - should not reference `window`, `document`, or any browser-specific objects
+> - should not directly reference any API keys or secrets, which will be exposed to the client, but instead call an endpoint that uses any required secrets
+
+It is recommended that you not store pre-request state in global variables, but instead use them only for cross-cutting concerns such as caching and holding database connections.
+
+> Mutating any shared state on the server will affect all clients, not just the current one.
 
 ### Input
 
-The `load` function receives an object containing four fields — `page`, `fetch`, `session` and `context`.
+The `load` function receives an object containing four fields — `page`, `fetch`, `session` and `stuff`. The `load` function is reactive, and will re-run when its parameters change, but only if they are used in the function. Specifically, if `page.query`, `page.path`, `session`, or `stuff` are used in the function, they will be re-run whenever their value changes. Note that destructuring parameters in the function declaration is enough to count as using them. In the example above, the `load({ page, fetch, session, stuff })` function will re-run every time `session` or `stuff` is changed, even though they are not used in the body of the function. If it was re-written as `load({ page, fetch })`, then it would only re-run when `page.params.slug` changes. The same reactivity applies to `page.params`, but only to the params actually used in the function. If `page.params.foo` changes, the example above would not re-run, because it did not access `page.params.foo`, only `page.params.slug`.
 
 #### page
 
@@ -83,19 +111,15 @@ So if the example above was `src/routes/blog/[slug].svelte` and the URL was `htt
 
 > When `fetch` runs on the server, the resulting response will be serialized and inlined into the rendered HTML. This allows the subsequent client-side `load` to access identical data immediately without an additional network request.
 
+> Cookies will only be passed through if the target host is the same as the SvelteKit application or a more specific subdomain of it.
+
 #### session
 
 `session` can be used to pass data from the server related to the current request, e.g. the current user. By default it is `undefined`. See [`getSession`](#hooks-getsession) to learn how to use it.
 
-#### context
+#### stuff
 
-`context` is passed from layout components to child layouts and page components. For the root `$layout.svelte` component, it is equal to `{}`, but if that component's `load` function returns an object with a `context` property, it will be available to subsequent `load` functions.
-
-> It is important to note that `load` may run on either the server or in the client browser. Code called inside `load` blocks:
->
-> - should run on the same domain as any upstream API servers requiring credentials
-> - should not reference `window`, `document` or any browser-specific objects
-> - should not reference any API keys or secrets, which will be exposed to the client
+`stuff` is passed from layout components to child layouts and page components and can be filled with anything else you need to make available. For the root `__layout.svelte` component, it is equal to `{}`, but if that component's `load` function returns an object with a `stuff` property, it will be available to subsequent `load` functions.
 
 ### Output
 
@@ -123,8 +147,8 @@ This only applies to page components, _not_ layout components.
 
 If the `load` function returns a `props` object, the props will be passed to the component when it is rendered.
 
-#### context
+#### stuff
 
-This will be merged with any existing `context` and passed to the `load` functions of subsequent layout and page components.
+This will be merged with any existing `stuff` and passed to the `load` functions of subsequent layout and page components.
 
 This only applies to layout components, _not_ page components.

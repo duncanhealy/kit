@@ -1,8 +1,8 @@
-import { copy, rimraf, mkdirp } from '../filesystem/index.js';
+import { SVELTE_KIT } from '../constants.js';
+import { copy, rimraf, mkdirp } from '../../utils/filesystem.js';
 import { prerender } from './prerender.js';
 
 /**
- *
  * @param {{
  *   cwd: string;
  *   config: import('types/config').ValidatedConfig;
@@ -18,34 +18,28 @@ export function get_utils({ cwd, config, build_data, log }) {
 		mkdirp,
 		copy,
 
-		/** @param {string} dest */
 		copy_client_files(dest) {
-			copy(`${cwd}/.svelte/output/client`, dest, (file) => file[0] !== '.');
+			copy(`${cwd}/${SVELTE_KIT}/output/client`, dest, (file) => file[0] !== '.');
 		},
 
-		/** @param {string} dest */
 		copy_server_files(dest) {
-			copy(`${cwd}/.svelte/output/server`, dest, (file) => file[0] !== '.');
+			copy(`${cwd}/${SVELTE_KIT}/output/server`, dest, (file) => file[0] !== '.');
 		},
 
-		/** @param {string} dest */
 		copy_static_files(dest) {
 			copy(config.kit.files.assets, dest);
 		},
 
-		/** @param {{ all: boolean, dest: string, fallback: string }} opts */
 		async prerender({ all = false, dest, fallback }) {
-			if (config.kit.prerender.enabled) {
-				await prerender({
-					out: dest,
-					all,
-					cwd,
-					config,
-					build_data,
-					fallback,
-					log
-				});
-			}
+			await prerender({
+				out: dest,
+				all,
+				cwd,
+				config,
+				build_data,
+				fallback,
+				log
+			});
 		}
 	};
 }

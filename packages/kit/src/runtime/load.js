@@ -1,13 +1,21 @@
 /**
  * @param {import('types/page').LoadOutput} loaded
- * @returns {import('types/page').LoadOutput}
+ * @returns {import('types/internal').NormalizedLoadOutput}
  */
 export function normalize(loaded) {
-	// TODO should this behaviour be dev-only?
-
-	if (loaded.error) {
-		const error = typeof loaded.error === 'string' ? new Error(loaded.error) : loaded.error;
+	const has_error_status =
+		loaded.status && loaded.status >= 400 && loaded.status <= 599 && !loaded.redirect;
+	if (loaded.error || has_error_status) {
 		const status = loaded.status;
+
+		if (!loaded.error && has_error_status) {
+			return {
+				status: status || 500,
+				error: new Error()
+			};
+		}
+
+		const error = typeof loaded.error === 'string' ? new Error(loaded.error) : loaded.error;
 
 		if (!(error instanceof Error)) {
 			return {
@@ -44,5 +52,13 @@ export function normalize(loaded) {
 		}
 	}
 
-	return loaded;
+	// TODO remove before 1.0
+	if (/** @type {any} */ (loaded).context) {
+		throw new Error(
+			'You are returning "context" from a load function. ' +
+				'"context" was renamed to "stuff", please adjust your code accordingly.'
+		);
+	}
+
+	return /** @type {import('types/internal').NormalizedLoadOutput} */ (loaded);
 }

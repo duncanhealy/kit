@@ -1,15 +1,22 @@
-import { createServer } from './server';
-/*eslint import/no-unresolved: [2, { ignore: ['\.\/app\.js$'] }]*/
-import * as app from './app.js';
+// @ts-ignore
+import { path, host, port } from './env.js';
+import { assetsMiddleware, kitMiddleware, prerenderedMiddleware } from './middlewares.js';
+import compression from 'compression';
+import polka from 'polka';
 
-const { PORT = 3000 } = process.env; // TODO configure via svelte.config.js
+const server = polka().use(
+	// https://github.com/lukeed/polka/issues/173
+	// @ts-ignore - nothing we can do about so just ignore it
+	compression({ threshold: 0 }),
+	assetsMiddleware,
+	kitMiddleware,
+	prerenderedMiddleware
+);
 
-const instance = createServer({ render: app.render }).listen(PORT, (err) => {
-	if (err) {
-		console.log('error', err);
-	} else {
-		console.log(`Listening on port ${PORT}`);
-	}
+const listenOpts = { path, host, port };
+
+server.listen(listenOpts, () => {
+	console.log(`Listening on ${path ? path : host + ':' + port}`);
 });
 
-export { instance };
+export { server };

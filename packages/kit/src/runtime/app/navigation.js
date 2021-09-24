@@ -1,5 +1,7 @@
-import { router } from '../client/singletons.js';
+import { router as router_ } from '../client/singletons.js';
 import { get_base_uri } from '../client/utils.js';
+
+const router = /** @type {import('../client/router').Router} */ (router_);
 
 /**
  * @param {string} name
@@ -11,6 +13,7 @@ function guard(name) {
 }
 
 export const goto = import.meta.env.SSR ? guard('goto') : goto_;
+export const invalidate = import.meta.env.SSR ? guard('invalidate') : invalidate_;
 export const prefetch = import.meta.env.SSR ? guard('prefetch') : prefetch_;
 export const prefetchRoutes = import.meta.env.SSR ? guard('prefetchRoutes') : prefetchRoutes_;
 
@@ -19,6 +22,14 @@ export const prefetchRoutes = import.meta.env.SSR ? guard('prefetchRoutes') : pr
  */
 async function goto_(href, opts) {
 	return router.goto(href, opts, []);
+}
+
+/**
+ * @type {import('$app/navigation').invalidate}
+ */
+async function invalidate_(resource) {
+	const { href } = new URL(resource, location.href);
+	return router.renderer.invalidate(href);
 }
 
 /**
@@ -36,7 +47,9 @@ async function prefetchRoutes_(pathnames) {
 		? router.routes.filter((route) => pathnames.some((pathname) => route[0].test(pathname)))
 		: router.routes;
 
-	const promises = matching.map((r) => r.length !== 1 && Promise.all(r[1].map((load) => load())));
+	const promises = matching
+		.filter(/** @returns {r is import('types/internal').CSRPage} */ (r) => r && r.length > 1)
+		.map((r) => Promise.all(r[1].map((load) => load())));
 
 	await Promise.all(promises);
 }

@@ -8,32 +8,52 @@ function scroll_state() {
 }
 
 /**
- * @param {Node} node
- * @returns {HTMLAnchorElement | SVGAElement}
+ * @param {Node | null} node
+ * @returns {HTMLAnchorElement | SVGAElement | null}
  */
 function find_anchor(node) {
 	while (node && node.nodeName.toUpperCase() !== 'A') node = node.parentNode; // SVG <a> elements have a lowercase name
 	return /** @type {HTMLAnchorElement | SVGAElement} */ (node);
 }
 
+/**
+ * @param {HTMLAnchorElement | SVGAElement} node
+ * @returns {URL}
+ */
+function get_href(node) {
+	return node instanceof SVGAElement
+		? new URL(node.href.baseVal, document.baseURI)
+		: new URL(node.href);
+}
+
 export class Router {
-	/** @param {{
+	/**
+	 * @param {{
 	 *    base: string;
 	 *    routes: import('types/internal').CSRRoute[];
-	 * }} opts */
-	constructor({ base, routes }) {
+	 *    trailing_slash: import('types/internal').TrailingSlash;
+	 *    renderer: import('./renderer').Renderer
+	 * }} opts
+	 */
+	constructor({ base, routes, trailing_slash, renderer }) {
 		this.base = base;
 		this.routes = routes;
-	}
+		this.trailing_slash = trailing_slash;
 
-	/** @param {import('./renderer').Renderer} renderer */
-	init(renderer) {
 		/** @type {import('./renderer').Renderer} */
 		this.renderer = renderer;
 		renderer.router = this;
 
 		this.enabled = true;
 
+		// make it possible to reset focus
+		document.body.setAttribute('tabindex', '-1');
+
+		// create initial history entry, so we can return here
+		history.replaceState(history.state || {}, '', location.href);
+	}
+
+	init_listeners() {
 		if ('scrollRestoration' in history) {
 			history.scrollRestoration = 'manual';
 		}
@@ -69,18 +89,18 @@ export class Router {
 			}, 50);
 		});
 
-		/** @param {MouseEvent} event */
+		/** @param {MouseEvent|TouchEvent} event */
 		const trigger_prefetch = (event) => {
 			const a = find_anchor(/** @type {Node} */ (event.target));
 			if (a && a.href && a.hasAttribute('sveltekit:prefetch')) {
-				this.prefetch(new URL(/** @type {string} */ (a.href)));
+				this.prefetch(get_href(a));
 			}
 		};
 
 		/** @type {NodeJS.Timeout} */
 		let mousemove_timeout;
 
-		/** @param {MouseEvent} event */
+		/** @param {MouseEvent|TouchEvent} event */
 		const handle_mousemove = (event) => {
 			clearTimeout(mousemove_timeout);
 			mousemove_timeout = setTimeout(() => {
@@ -106,12 +126,8 @@ export class Router {
 
 			if (!a.href) return;
 
-			// check if link is inside an svg
-			// in this case, both href and target are always inside an object
-			const svg = typeof a.href === 'object' && a.href.constructor.name === 'SVGAnimatedString';
-			const href = String(svg ? /** @type {SVGAElement} */ (a).href.baseVal : a.href);
-
-			if (href === location.href) {
+			const url = get_href(a);
+			if (url.toString() === location.href) {
 				if (!location.hash) event.preventDefault();
 				return;
 			}
@@ -119,87 +135,75 @@ export class Router {
 			// Ignore if tag has
 			// 1. 'download' attribute
 			// 2. 'rel' attribute includes external
-			const rel = a.getAttribute('rel')?.split(/\s+/);
+			const rel = (a.getAttribute('rel') || '').split(/\s+/);
 
 			if (a.hasAttribute('download') || (rel && rel.includes('external'))) {
 				return;
 			}
 
 			// Ignore if <a> has a target
-			if (svg ? /** @type {SVGAElement} */ (a).target.baseVal : a.target) return;
+			if (a instanceof SVGAElement ? a.target.baseVal : a.target) return;
 
-			const url = new URL(href);
+			if (!this.owns(url)) return;
 
-			// Don't handle hash changes
-			if (url.pathname === location.pathname && url.search === location.search) return;
+			const noscroll = a.hasAttribute('sveltekit:noscroll');
 
-			const info = this.parse(url);
-			if (info) {
-				const noscroll = a.hasAttribute('sveltekit:noscroll');
-				history.pushState({}, '', url.href);
-				this._navigate(info, noscroll ? scroll_state() : null, [], url.hash);
-				event.preventDefault();
-			}
+			history.pushState({}, '', url.href);
+			this._navigate(url, noscroll ? scroll_state() : null, false, [], url.hash);
+			event.preventDefault();
 		});
 
 		addEventListener('popstate', (event) => {
 			if (event.state && this.enabled) {
 				const url = new URL(location.href);
-				const info = this.parse(url);
-				if (info) {
-					this._navigate(info, event.state['sveltekit:scroll'], []);
-				} else {
-					// eslint-disable-next-line
-					location.href = location.href; // nosonar
-				}
+				this._navigate(url, event.state['sveltekit:scroll'], false, []);
 			}
 		});
+	}
 
-		// make it possible to reset focus
-		document.body.setAttribute('tabindex', '-1');
-
-		// create initial history entry, so we can return here
-		history.replaceState(history.state || {}, '', location.href);
+	/** @param {URL} url */
+	owns(url) {
+		return url.origin === location.origin && url.pathname.startsWith(this.base);
 	}
 
 	/**
 	 * @param {URL} url
-	 * @returns {import('./types').NavigationInfo}
+	 * @returns {import('./types').NavigationInfo | undefined}
 	 */
 	parse(url) {
-		if (url.origin !== location.origin) return null;
-		if (!url.pathname.startsWith(this.base)) return null;
+		if (this.owns(url)) {
+			const path = url.pathname.slice(this.base.length) || '/';
 
-		const path = url.pathname.slice(this.base.length) || '/';
+			const decoded_path = decodeURI(path);
+			const routes = this.routes.filter(([pattern]) => pattern.test(decoded_path));
 
-		const routes = this.routes.filter(([pattern]) => pattern.test(path));
-
-		if (routes.length > 0) {
 			const query = new URLSearchParams(url.search);
 			const id = `${path}?${query}`;
 
-			return { id, routes, path, query };
+			return { id, routes, path, decoded_path, query };
 		}
 	}
 
 	/**
-	 * @param {string} href
-	 * @param {{ noscroll?: boolean, replaceState?: boolean }} opts
+	 * @typedef {Parameters<typeof import('$app/navigation').goto>} GotoParams
+	 *
+	 * @param {GotoParams[0]} href
+	 * @param {GotoParams[1]} opts
 	 * @param {string[]} chain
 	 */
-	async goto(href, { noscroll = false, replaceState = false } = {}, chain) {
-		if (this.enabled) {
-			const url = new URL(href, get_base_uri(document));
-			const info = this.parse(url);
+	async goto(
+		href,
+		{ noscroll = false, replaceState = false, keepfocus = false, state = {} } = {},
+		chain
+	) {
+		const url = new URL(href, get_base_uri(document));
 
-			if (info) {
-				// TODO shouldn't need to pass the hash here
-				history[replaceState ? 'replaceState' : 'pushState']({}, '', href);
-				return this._navigate(info, noscroll ? scroll_state() : null, chain, url.hash);
-			}
+		if (this.enabled && this.owns(url)) {
+			history[replaceState ? 'replaceState' : 'pushState'](state, '', href);
+			return this._navigate(url, noscroll ? scroll_state() : null, keepfocus, chain, url.hash);
 		}
 
-		location.href = href;
+		location.href = url.href;
 		return new Promise(() => {
 			/* never resolves */
 		});
@@ -220,40 +224,62 @@ export class Router {
 	async prefetch(url) {
 		const info = this.parse(url);
 
-		if (info) {
-			return this.renderer.load(info);
-		} else {
-			throw new Error(`Could not prefetch ${url.href}`);
+		if (!info) {
+			throw new Error('Attempted to prefetch a URL that does not belong to this app');
 		}
+
+		return this.renderer.load(info);
 	}
 
 	/**
-	 * @param {import('./types').NavigationInfo} info
-	 * @param {{ x: number, y: number }} scroll
+	 * @param {URL} url
+	 * @param {{ x: number, y: number }?} scroll
+	 * @param {boolean} keepfocus
 	 * @param {string[]} chain
 	 * @param {string} [hash]
 	 */
-	async _navigate(info, scroll, chain, hash) {
+	async _navigate(url, scroll, keepfocus, chain, hash) {
+		const info = this.parse(url);
+
+		if (!info) {
+			throw new Error('Attempted to navigate to a URL that does not belong to this app');
+		}
+
+		// remove trailing slashes
+		if (info.path !== '/') {
+			const has_trailing_slash = info.path.endsWith('/');
+
+			const incorrect =
+				(has_trailing_slash && this.trailing_slash === 'never') ||
+				(!has_trailing_slash &&
+					this.trailing_slash === 'always' &&
+					!(info.path.split('/').pop() || '').includes('.'));
+
+			if (incorrect) {
+				info.path = has_trailing_slash ? info.path.slice(0, -1) : info.path + '/';
+				history.replaceState({}, '', `${this.base}${info.path}${location.search}`);
+			}
+		}
+
 		this.renderer.notify({
 			path: info.path,
 			query: info.query
 		});
 
-		// remove trailing slashes
-		if (location.pathname.endsWith('/') && location.pathname !== '/') {
-			history.replaceState({}, '', `${location.pathname.slice(0, -1)}${location.search}`);
+		await this.renderer.update(info, chain, false);
+
+		if (!keepfocus) {
+			document.body.focus();
 		}
-
-		await this.renderer.update(info, chain);
-
-		document.body.focus();
 
 		const deep_linked = hash && document.getElementById(hash.slice(1));
 		if (scroll) {
 			scrollTo(scroll.x, scroll.y);
 		} else if (deep_linked) {
-			// scroll is an element id (from a hash), we need to compute y
-			scrollTo(0, deep_linked.getBoundingClientRect().top + scrollY);
+			// Here we use `scrollIntoView` on the element instead of `scrollTo`
+			// because it natively supports the `scroll-margin` and `scroll-behavior`
+			// CSS properties.
+			deep_linked.scrollIntoView();
 		} else {
 			scrollTo(0, 0);
 		}

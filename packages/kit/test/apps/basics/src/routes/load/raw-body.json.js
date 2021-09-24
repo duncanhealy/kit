@@ -2,8 +2,8 @@
 export function post(request) {
 	return {
 		body: {
-			body: request.body,
-			rawBody: request.rawBody
+			body: /** @type {string} */ (request.body),
+			rawBody: new TextDecoder().decode(/** @type {Uint8Array} */ (request.rawBody))
 		}
 	};
 }

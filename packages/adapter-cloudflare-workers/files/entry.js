@@ -1,6 +1,8 @@
 // TODO hardcoding the relative location makes this brittle
-import { render } from '../output/server/app.js'; // eslint-disable-line import/no-unresolved
-import { getAssetFromKV, NotFoundError } from '@cloudflare/kv-asset-handler'; // eslint-disable-line import/no-unresolved
+import { init, render } from '../output/server/app.js';
+import { getAssetFromKV, NotFoundError } from '@cloudflare/kv-asset-handler';
+
+init();
 
 addEventListener('fetch', (event) => {
 	event.respondWith(handle(event));
@@ -31,7 +33,7 @@ async function handle(event) {
 			host: request_url.host,
 			path: request_url.pathname,
 			query: request_url.searchParams,
-			rawBody: request.body ? await read(request) : null,
+			rawBody: await read(request),
 			headers: Object.fromEntries(request.headers),
 			method: request.method
 		});
@@ -39,7 +41,7 @@ async function handle(event) {
 		if (rendered) {
 			return new Response(rendered.body, {
 				status: rendered.status,
-				headers: rendered.headers
+				headers: makeHeaders(rendered.headers)
 			});
 		}
 	} catch (e) {
@@ -52,11 +54,26 @@ async function handle(event) {
 	});
 }
 
-function read(request) {
-	const type = request.headers.get('content-type') || '';
-	if (type.includes('application/octet-stream')) {
-		return request.arrayBuffer();
-	}
+/** @param {Request} request */
+async function read(request) {
+	return new Uint8Array(await request.arrayBuffer());
+}
 
-	return request.text();
+/**
+ * @param {Record<string, string | string[]>} headers
+ * @returns {Request}
+ */
+function makeHeaders(headers) {
+	const result = new Headers();
+	for (const header in headers) {
+		const value = headers[header];
+		if (typeof value === 'string') {
+			result.set(header, value);
+			continue;
+		}
+		for (const sub of value) {
+			result.append(header, sub);
+		}
+	}
+	return result;
 }

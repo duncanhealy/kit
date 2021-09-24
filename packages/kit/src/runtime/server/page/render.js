@@ -1,5 +1,7 @@
 import devalue from 'devalue';
 import { writable } from 'svelte/store';
+import { coalesce_to_error } from '../../../utils/error.js';
+import { hash } from '../../hash.js';
 
 const s = JSON.stringify;
 
@@ -7,29 +9,29 @@ const s = JSON.stringify;
 
 /**
  * @param {{
+ *   branch: Array<import('./types').Loaded>;
  *   options: import('types/internal').SSRRenderOptions;
  *   $session: any;
  *   page_config: { hydrate: boolean, router: boolean, ssr: boolean };
  *   status: number;
- *   error: Error,
- *   branch: import('./types').Loaded[];
- *   page: import('types/page').Page
+ *   error?: Error,
+ *   page?: import('types/page').Page
  * }} opts
  */
 export async function render_response({
+	branch,
 	options,
 	$session,
 	page_config,
 	status,
 	error,
-	branch,
 	page
 }) {
 	const css = new Set(options.entry.css);
 	const js = new Set(options.entry.js);
 	const styles = new Set();
 
-	/** @type {Array<{ url: string, json: string }>} */
+	/** @type {Array<{ url: string, body: string, json: string }>} */
 	const serialized_data = [];
 
 	let rendered;
@@ -41,7 +43,7 @@ export async function render_response({
 		error.stack = options.get_stack(error);
 	}
 
-	if (branch) {
+	if (page_config.ssr) {
 		branch.forEach(({ node, loaded, fetched, uses_credentials }) => {
 			if (node.css) node.css.forEach((url) => css.add(url));
 			if (node.js) node.js.forEach((url) => js.add(url));
@@ -86,7 +88,7 @@ export async function render_response({
 			unsubscribe();
 		}
 	} else {
-		rendered = { head: '', html: '', css: '' };
+		rendered = { head: '', html: '', css: { code: '', map: null } };
 	}
 
 	const include_js = page_config.router || page_config.hydrate;
@@ -94,8 +96,8 @@ export async function render_response({
 
 	// TODO strip the AMP stuff out of the build if not relevant
 	const links = options.amp
-		? styles.size > 0
-			? `<style amp-custom>${Array.from(styles).join('\n')}</style>`
+		? styles.size > 0 || rendered.css.code.length > 0
+			? `<style amp-custom>${Array.from(styles).concat(rendered.css.code).join('\n')}</style>`
 			: ''
 		: [
 				...Array.from(js).map((dep) => `<link rel="modulepreload" href="${dep}">`),
@@ -123,22 +125,31 @@ export async function render_response({
 				host: ${page && page.host ? s(page.host) : 'location.host'},
 				route: ${!!page_config.router},
 				spa: ${!page_config.ssr},
-				hydrate: ${page_config.ssr && page_config.hydrate? `{
+				trailing_slash: ${s(options.trailing_slash)},
+				hydrate: ${page_config.ssr && page_config.hydrate ? `{
 					status: ${status},
 					error: ${serialize_error(error)},
 					nodes: [
-						${branch
+						${(branch || [])
 						.map(({ node }) => `import(${s(node.entry)})`)
 						.join(',\n\t\t\t\t\t\t')}
 					],
 					page: {
-						host: ${page.host ? s(page.host) : 'location.host'}, // TODO this is redundant
-						path: ${s(page.path)},
-						query: new URLSearchParams(${s(page.query.toString())}),
-						params: ${s(page.params)}
+						host: ${page && page.host ? s(page.host) : 'location.host'}, // TODO this is redundant
+						path: ${s(page && page.path)},
+						query: new URLSearchParams(${page ? s(page.query.toString()) : ''}),
+						params: ${page && s(page.params)}
 					}
 				}` : 'null'}
 			});
+		</script>`;
+	}
+
+	if (options.service_worker) {
+		init += `<script>
+			if ('serviceWorker' in navigator) {
+				navigator.serviceWorker.register('${options.service_worker}');
+			}
 		</script>`;
 	}
 
@@ -156,17 +167,26 @@ export async function render_response({
 		: `${rendered.html}
 
 			${serialized_data
-				.map(({ url, json }) => `<script type="svelte-data" url="${url}">${json}</script>`)
-				.join('\n\n\t\t\t')}
-		`.replace(/^\t{2}/gm, '');
+				.map(({ url, body, json }) => {
+					let attributes = `type="application/json" data-type="svelte-data" data-url="${url}"`;
+					if (body) attributes += ` data-body="${hash(body)}"`;
 
-	/** @type {import('types/helper').Headers} */
+					return `<script ${attributes}>${json}</script>`;
+				})
+				.join('\n\n\t')}
+		`;
+
+	/** @type {import('types/helper').ResponseHeaders} */
 	const headers = {
 		'content-type': 'text/html'
 	};
 
 	if (maxage) {
 		headers['cache-control'] = `${is_private ? 'private' : 'public'}, max-age=${maxage}`;
+	}
+
+	if (!options.floc) {
+		headers['permissions-policy'] = 'interest-cohort=()';
 	}
 
 	return {
@@ -184,20 +204,20 @@ function try_serialize(data, fail) {
 	try {
 		return devalue(data);
 	} catch (err) {
-		if (fail) fail(err);
+		if (fail) fail(coalesce_to_error(err));
 		return null;
 	}
 }
 
 // Ensure we return something truthy so the client will not re-render the page over the error
 
-/** @param {Error} error */
+/** @param {(Error & {frame?: string} & {loc?: object}) | undefined | null} error */
 function serialize_error(error) {
 	if (!error) return null;
 	let serialized = try_serialize(error);
 	if (!serialized) {
 		const { name, message, stack } = error;
-		serialized = try_serialize({ name, message, stack });
+		serialized = try_serialize({ ...error, name, message, stack });
 	}
 	if (!serialized) {
 		serialized = '{}';

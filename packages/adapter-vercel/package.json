@@ -1,20 +1,34 @@
 {
 	"name": "@sveltejs/adapter-vercel",
-	"version": "1.0.0-next.14",
+	"version": "1.0.0-next.29",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/sveltejs/kit",
+		"directory": "packages/adapter-vercel"
+	},
+	"homepage": "https://kit.svelte.dev",
+	"type": "module",
+	"exports": {
+		".": {
+			"import": "./index.js"
+		},
+		"./package.json": "./package.json"
+	},
 	"main": "index.js",
+	"types": "index.d.ts",
 	"files": [
-		"files"
+		"files",
+		"index.d.ts"
 	],
 	"scripts": {
 		"lint": "eslint --ignore-path .gitignore \"**/*.{ts,js,svelte}\" && npm run check-format",
-		"format": "prettier --write . --config ../../.prettierrc --ignore-path .gitignore",
+		"format": "npm run check-format -- --write",
 		"check-format": "prettier --check . --config ../../.prettierrc --ignore-path .gitignore"
 	},
 	"dependencies": {
-		"@sveltejs/kit": "workspace:*",
-		"esbuild": "^0.11.12"
+		"esbuild": "^0.12.28"
 	},
 	"devDependencies": {
-		"typescript": "^4.2.3"
+		"@sveltejs/kit": "workspace:*"
 	}
 }

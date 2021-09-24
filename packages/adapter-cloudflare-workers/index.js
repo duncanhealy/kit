@@ -1,39 +1,52 @@
-'use strict';
+import fs from 'fs';
+import { execSync } from 'child_process';
+import esbuild from 'esbuild';
+import toml from '@iarna/toml';
+import { fileURLToPath } from 'url';
 
-const fs = require('fs');
-const { execSync } = require('child_process');
-const esbuild = require('esbuild');
-const toml = require('toml');
+/**
+ * @typedef {import('esbuild').BuildOptions} BuildOptions
+ */
 
-module.exports = function () {
-	/** @type {import('@sveltejs/kit').Adapter} */
-	const adapter = {
+/** @type {import('.')} */
+export default function (options) {
+	return {
 		name: '@sveltejs/adapter-cloudflare-workers',
-		async adapt(utils) {
+
+		async adapt({ utils }) {
 			const { site } = validate_config(utils);
 
 			const bucket = site.bucket;
 			const entrypoint = site['entry-point'] || 'workers-site';
 
+			const files = fileURLToPath(new URL('./files', import.meta.url));
+
 			utils.rimraf(bucket);
 			utils.rimraf(entrypoint);
 
 			utils.log.info('Installing worker dependencies...');
-			utils.copy(`${__dirname}/files/_package.json`, '.svelte/cloudflare-workers/package.json');
+			utils.copy(`${files}/_package.json`, '.svelte-kit/cloudflare-workers/package.json');
 
 			// TODO would be cool if we could make this step unnecessary somehow
-			const stdout = execSync('npm install', { cwd: '.svelte/cloudflare-workers' });
+			const stdout = execSync('npm install', { cwd: '.svelte-kit/cloudflare-workers' });
 			utils.log.info(stdout.toString());
 
 			utils.log.minor('Generating worker...');
-			utils.copy(`${__dirname}/files/entry.js`, '.svelte/cloudflare-workers/entry.js');
+			utils.copy(`${files}/entry.js`, '.svelte-kit/cloudflare-workers/entry.js');
 
-			await esbuild.build({
-				entryPoints: ['.svelte/cloudflare-workers/entry.js'],
+			/** @type {BuildOptions} */
+			const default_options = {
+				entryPoints: ['.svelte-kit/cloudflare-workers/entry.js'],
 				outfile: `${entrypoint}/index.js`,
 				bundle: true,
-				platform: 'node' // TODO would be great if we could generate ESM and use type = "javascript"
-			});
+				target: 'es2020',
+				platform: 'browser'
+			};
+
+			const build_options =
+				options && options.esbuild ? await options.esbuild(default_options) : default_options;
+
+			await esbuild.build(build_options);
 
 			fs.writeFileSync(`${entrypoint}/package.json`, JSON.stringify({ main: 'index.js' }));
 
@@ -47,9 +60,7 @@ module.exports = function () {
 			utils.copy_client_files(bucket);
 		}
 	};
-
-	return adapter;
-};
+}
 
 function validate_config(utils) {
 	if (fs.existsSync('wrangler.toml')) {

@@ -1,12 +1,18 @@
 import fs from 'fs';
 import path from 'path';
-import { rimraf } from '../filesystem/index.js';
-import create_manifest_data from '../../core/create_manifest_data/index.js';
-import { copy_assets, get_no_external, posixify, resolve_entry } from '../utils.js';
-import { create_app } from '../../core/create_app/index.js';
-import vite from 'vite';
-import svelte from '@sveltejs/vite-plugin-svelte';
+
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 import glob from 'tiny-glob/sync.js';
+import vite from 'vite';
+
+import { rimraf } from '../../utils/filesystem.js';
+import { deep_merge } from '../../utils/object.js';
+
+import { print_config_conflicts } from '../config/index.js';
+import { create_app } from '../create_app/index.js';
+import create_manifest_data from '../create_manifest_data/index.js';
+import { SVELTE_KIT } from '../constants.js';
+import { copy_assets, posixify, resolve_entry } from '../utils.js';
 
 /** @param {any} value */
 const s = (value) => JSON.stringify(value);
@@ -26,27 +32,28 @@ const s = (value) => JSON.stringify(value);
  * @returns {Promise<import('types/internal').BuildData>}
  */
 export async function build(config, { cwd = process.cwd(), runtime = '@sveltejs/kit/ssr' } = {}) {
-	const build_dir = path.resolve(cwd, '.svelte/build');
+	const build_dir = path.resolve(cwd, `${SVELTE_KIT}/build`);
 
 	rimraf(build_dir);
 
-	const output_dir = path.resolve(cwd, '.svelte/output');
+	const output_dir = path.resolve(cwd, `${SVELTE_KIT}/output`);
 
 	const options = {
 		cwd,
 		config,
 		build_dir,
-		base:
-			config.kit.paths.assets === '/.'
-				? `/${config.kit.appDir}/`
-				: `${config.kit.paths.assets}/${config.kit.appDir}/`,
+		// TODO this is so that Vite's preloading works. Unfortunately, it fails
+		// during `svelte-kit preview`, because we use a local asset path. If Vite
+		// used relative paths, I _think_ this could get fixed. Issue here:
+		// https://github.com/vitejs/vite/issues/2009
+		assets_base: `${config.kit.paths.assets || config.kit.paths.base}/${config.kit.appDir}/`,
 		manifest: create_manifest_data({
 			config,
 			output: build_dir,
 			cwd
 		}),
 		output_dir,
-		client_entry_file: '.svelte/build/runtime/internal/start.js',
+		client_entry_file: `${SVELTE_KIT}/build/runtime/internal/start.js`,
 		service_worker_entry_file: resolve_entry(config.kit.files.serviceWorker)
 	};
 
@@ -54,9 +61,7 @@ export async function build(config, { cwd = process.cwd(), runtime = '@sveltejs/
 	await build_server(options, client_manifest, runtime);
 
 	if (options.service_worker_entry_file) {
-		const { base, assets } = config.kit.paths;
-
-		if (assets !== base && assets !== '/.') {
+		if (config.kit.paths.assets) {
 			throw new Error('Cannot use service worker alongside config.kit.paths.assets');
 		}
 
@@ -71,7 +76,7 @@ export async function build(config, { cwd = process.cwd(), runtime = '@sveltejs/
 		server,
 		static: options.manifest.assets.map((asset) => posixify(asset.file)),
 		entries: options.manifest.routes
-			.map((route) => route.type === 'page' && route.path)
+			.map((route) => (route.type === 'page' ? route.path : ''))
 			.filter(Boolean)
 	};
 }
@@ -79,24 +84,23 @@ export async function build(config, { cwd = process.cwd(), runtime = '@sveltejs/
 /**
  * @param {{
  *   cwd: string;
- *   base: string;
+ *   assets_base: string;
  *   config: import('types/config').ValidatedConfig
  *   manifest: import('types/internal').ManifestData
  *   build_dir: string;
  *   output_dir: string;
  *   client_entry_file: string;
- *   service_worker_entry_file: string;
+ *   service_worker_entry_file: string | null;
  * }} options
  */
 async function build_client({
 	cwd,
-	base,
+	assets_base,
 	config,
 	manifest,
 	build_dir,
 	output_dir,
-	client_entry_file,
-	service_worker_entry_file
+	client_entry_file
 }) {
 	create_app({
 		manifest_data: manifest,
@@ -107,7 +111,6 @@ async function build_client({
 	copy_assets(build_dir);
 
 	process.env.VITE_SVELTEKIT_AMP = config.kit.amp ? 'true' : '';
-	process.env.VITE_SVELTEKIT_SERVICE_WORKER = service_worker_entry_file ? '/service-worker.js' : '';
 
 	const client_out_dir = `${output_dir}/client/${config.kit.appDir}`;
 	const client_manifest_file = `${client_out_dir}/manifest.json`;
@@ -131,21 +134,30 @@ async function build_client({
 	});
 
 	/** @type {any} */
-	const user_config = config.kit.vite();
+	const vite_config = config.kit.vite();
 
-	await vite.build({
-		...user_config,
+	const default_config = {
+		server: {
+			fs: {
+				strict: true
+			}
+		}
+	};
+
+	// don't warn on overriding defaults
+	const [modified_vite_config] = deep_merge(default_config, vite_config);
+
+	/** @type {[any, string[]]} */
+	const [merged_config, conflicts] = deep_merge(modified_vite_config, {
 		configFile: false,
 		root: cwd,
-		base,
+		base: assets_base,
 		build: {
-			...user_config.build,
 			cssCodeSplit: true,
 			manifest: true,
 			outDir: client_out_dir,
 			polyfillDynamicImport: false,
 			rollupOptions: {
-				...(user_config.build && user_config.build.rollupOptions),
 				input,
 				output: {
 					entryFileNames: '[name]-[hash].js',
@@ -156,20 +168,25 @@ async function build_client({
 			}
 		},
 		resolve: {
-			...user_config.resolve,
 			alias: {
-				...(user_config.resolve && user_config.resolve.alias),
 				$app: path.resolve(`${build_dir}/runtime/app`),
 				$lib: config.kit.files.lib
 			}
 		},
 		plugins: [
-			...(user_config.plugins || []),
 			svelte({
-				extensions: config.extensions
+				extensions: config.extensions,
+				emitCss: !config.kit.amp,
+				compilerOptions: {
+					hydratable: !!config.kit.hydrate
+				}
 			})
 		]
 	});
+
+	print_config_conflicts(conflicts, 'kit.vite.', 'build_client');
+
+	await vite.build(merged_config);
 
 	/** @type {ClientManifest} */
 	const client_manifest = JSON.parse(fs.readFileSync(client_manifest_file, 'utf-8'));
@@ -181,25 +198,34 @@ async function build_client({
 /**
  * @param {{
  *   cwd: string;
- *   base: string;
+ *   assets_base: string;
  *   config: import('types/config').ValidatedConfig
  *   manifest: import('types/internal').ManifestData
  *   build_dir: string;
  *   output_dir: string;
  *   client_entry_file: string;
- *   service_worker_entry_file: string;
+ *   service_worker_entry_file: string | null;
  * }} options
  * @param {ClientManifest} client_manifest
  * @param {string} runtime
  */
 async function build_server(
-	{ cwd, base, config, manifest, build_dir, output_dir, client_entry_file },
+	{
+		cwd,
+		assets_base,
+		config,
+		manifest,
+		build_dir,
+		output_dir,
+		client_entry_file,
+		service_worker_entry_file
+	},
 	client_manifest,
 	runtime
 ) {
 	let hooks_file = resolve_entry(config.kit.files.hooks);
-	if (!fs.existsSync(hooks_file)) {
-		hooks_file = path.resolve(cwd, '.svelte/build/hooks.js');
+	if (!hooks_file || !fs.existsSync(hooks_file)) {
+		hooks_file = path.resolve(cwd, `${SVELTE_KIT}/build/hooks.js`);
 		fs.writeFileSync(hooks_file, '');
 	}
 
@@ -211,7 +237,7 @@ async function build_server(
 		return relative_file[0] === '.' ? relative_file : `./${relative_file}`;
 	};
 
-	const prefix = `${config.kit.paths.assets}/${config.kit.appDir}/`;
+	const prefix = `/${config.kit.appDir}/`;
 
 	/**
 	 * @param {string} file
@@ -242,18 +268,18 @@ async function build_server(
 
 		find_deps(file, js_deps, css_deps);
 
-		const js = Array.from(js_deps).map((url) => prefix + url);
-		const css = Array.from(css_deps).map((url) => prefix + url);
+		const js = Array.from(js_deps);
+		const css = Array.from(css_deps);
 
 		const styles = config.kit.amp
 			? Array.from(css_deps).map((url) => {
 					const resolved = `${output_dir}/client/${config.kit.appDir}/${url}`;
 					return fs.readFileSync(resolved, 'utf-8');
 			  })
-			: null;
+			: [];
 
 		metadata_lookup[file] = {
-			entry: prefix + client_manifest[file].file,
+			entry: client_manifest[file].file,
 			css,
 			js,
 			styles
@@ -273,7 +299,7 @@ async function build_server(
 		`
 			import { respond } from '${runtime}';
 			import root from './generated/root.svelte';
-			import { set_paths } from './runtime/paths.js';
+			import { set_paths, assets } from './runtime/paths.js';
 			import { set_prerendering } from './runtime/env.js';
 			import * as user_hooks from ${s(app_relative(hooks_file))};
 
@@ -283,43 +309,65 @@ async function build_server(
 
 			let options = null;
 
+			const default_settings = { paths: ${s(config.kit.paths)} };
+
 			// allow paths to be overridden in svelte-kit preview
 			// and in prerendering
-			export function init(settings) {
+			export function init(settings = default_settings) {
 				set_paths(settings.paths);
 				set_prerendering(settings.prerendering || false);
+
+				const hooks = get_hooks(user_hooks);
 
 				options = {
 					amp: ${config.kit.amp},
 					dev: false,
 					entry: {
-						file: ${s(prefix + client_manifest[client_entry_file].file)},
-						css: ${s(Array.from(entry_css).map(dep => prefix + dep))},
-						js: ${s(Array.from(entry_js).map(dep => prefix + dep))}
+						file: assets + ${s(prefix + client_manifest[client_entry_file].file)},
+						css: [${Array.from(entry_css).map(dep => 'assets + ' + s(prefix + dep))}],
+						js: [${Array.from(entry_js).map(dep => 'assets + ' + s(prefix + dep))}]
 					},
 					fetched: undefined,
-					get_component_path: id => ${s(`${config.kit.paths.assets}/${config.kit.appDir}/`)} + entry_lookup[id],
+					floc: ${config.kit.floc},
+					get_component_path: id => assets + ${s(prefix)} + entry_lookup[id],
 					get_stack: error => String(error), // for security
-					handle_error: error => {
-						console.error(error.stack);
+					handle_error: (error, request) => {
+						hooks.handleError({ error, request });
 						error.stack = options.get_stack(error);
 					},
-					hooks: get_hooks(user_hooks),
+					hooks,
 					hydrate: ${s(config.kit.hydrate)},
 					initiator: undefined,
 					load_component,
 					manifest,
 					paths: settings.paths,
+					prerender: ${config.kit.prerender.enabled},
 					read: settings.read,
 					root,
+					service_worker: ${service_worker_entry_file ? "'/service-worker.js'" : 'null'},
 					router: ${s(config.kit.router)},
 					ssr: ${s(config.kit.ssr)},
 					target: ${s(config.kit.target)},
-					template
+					template,
+					trailing_slash: ${s(config.kit.trailingSlash)}
 				};
 			}
 
-			const d = decodeURIComponent;
+			// input has already been decoded by decodeURI
+			// now handle the rest that decodeURIComponent would do
+			const d = s => s
+				.replace(/%23/g, '#')
+				.replace(/%3[Bb]/g, ';')
+				.replace(/%2[Cc]/g, ',')
+				.replace(/%2[Ff]/g, '/')
+				.replace(/%3[Ff]/g, '?')
+				.replace(/%3[Aa]/g, ':')
+				.replace(/%40/g, '@')
+				.replace(/%26/g, '&')
+				.replace(/%3[Dd]/g, '=')
+				.replace(/%2[Bb]/g, '+')
+				.replace(/%24/g, '$');
+
 			const empty = () => ({});
 
 			const manifest = {
@@ -358,9 +406,10 @@ async function build_server(
 			// this looks redundant, but the indirection allows us to access
 			// named imports without triggering Rollup's missing import detection
 			const get_hooks = hooks => ({
-				getContext: hooks.getContext || (() => ({})),
 				getSession: hooks.getSession || (() => ({})),
-				handle: hooks.handle || (({ request, render }) => render(request))
+				handle: hooks.handle || (({ request, resolve }) => resolve(request)),
+				handleError: hooks.handleError || (({ error }) => console.error(error.stack)),
+				externalFetch: hooks.externalFetch || fetch
 			});
 
 			const module_lookup = {
@@ -370,13 +419,15 @@ async function build_server(
 			const metadata_lookup = ${s(metadata_lookup)};
 
 			async function load_component(file) {
+				const { entry, css, js, styles } = metadata_lookup[file];
 				return {
 					module: await module_lookup[file](),
-					...metadata_lookup[file]
+					entry: assets + ${s(prefix)} + entry,
+					css: css.map(dep => assets + ${s(prefix)} + dep),
+					js: js.map(dep => assets + ${s(prefix)} + dep),
+					styles
 				};
 			}
-
-			init({ paths: ${s(config.kit.paths)} });
 
 			export function render(request, {
 				prerender
@@ -389,22 +440,31 @@ async function build_server(
 			.trim()
 	);
 
-	/** @type {any} */
-	const user_config = config.kit.vite();
+	/** @type {import('vite').UserConfig} */
+	const vite_config = config.kit.vite();
 
-	await vite.build({
-		...user_config,
+	const default_config = {
+		server: {
+			fs: {
+				strict: true
+			}
+		}
+	};
+
+	// don't warn on overriding defaults
+	const [modified_vite_config] = deep_merge(default_config, vite_config);
+
+	/** @type {[any, string[]]} */
+	const [merged_config, conflicts] = deep_merge(modified_vite_config, {
 		configFile: false,
 		root: cwd,
-		base,
+		base: assets_base,
 		build: {
 			target: 'es2018',
-			...user_config.build,
 			ssr: true,
 			outDir: `${output_dir}/server`,
 			polyfillDynamicImport: false,
 			rollupOptions: {
-				...(user_config.build && user_config.build.rollupOptions),
 				input: {
 					app: app_file
 				},
@@ -418,51 +478,42 @@ async function build_server(
 				preserveEntrySignatures: 'strict'
 			}
 		},
+		plugins: [
+			svelte({
+				extensions: config.extensions,
+				compilerOptions: {
+					hydratable: !!config.kit.hydrate
+				}
+			})
+		],
 		resolve: {
-			...user_config.resolve,
 			alias: {
-				...(user_config.resolve && user_config.resolve.alias),
 				$app: path.resolve(`${build_dir}/runtime/app`),
 				$lib: config.kit.files.lib
 			}
-		},
-		plugins: [
-			...(user_config.plugins || []),
-			svelte({
-				extensions: config.extensions
-			})
-		],
-		// this API is marked as @alpha https://github.com/vitejs/vite/blob/27785f7fcc5b45987b5f0bf308137ddbdd9f79ea/packages/vite/src/node/config.ts#L129
-		// it's not exposed in the typescript definitions as a result
-		// so we need to ignore the fact that it's missing
-		// @ts-ignore
-		ssr: {
-			...user_config.ssr,
-			// note to self: this _might_ need to be ['svelte', '@sveltejs/kit', ...get_no_external()]
-			// but I'm honestly not sure. roll with this for now and see if it's ok
-			noExternal: get_no_external(cwd, user_config.ssr && user_config.ssr.noExternal)
-		},
-		optimizeDeps: {
-			entries: []
 		}
 	});
+
+	print_config_conflicts(conflicts, 'kit.vite.', 'build_server');
+
+	await vite.build(merged_config);
 }
 
 /**
  * @param {{
  *   cwd: string;
- *   base: string;
+ *   assets_base: string;
  *   config: import('types/config').ValidatedConfig
  *   manifest: import('types/internal').ManifestData
  *   build_dir: string;
  *   output_dir: string;
  *   client_entry_file: string;
- *   service_worker_entry_file: string;
+ *   service_worker_entry_file: string | null;
  * }} options
  * @param {ClientManifest} client_manifest
  */
 async function build_service_worker(
-	{ cwd, base, config, manifest, build_dir, output_dir, service_worker_entry_file },
+	{ cwd, assets_base, config, manifest, build_dir, output_dir, service_worker_entry_file },
 	client_manifest
 ) {
 	// TODO add any assets referenced in template .html file, e.g. favicon?
@@ -499,22 +550,31 @@ async function build_service_worker(
 	);
 
 	/** @type {any} */
-	const user_config = config.kit.vite();
+	const vite_config = config.kit.vite();
 
-	await vite.build({
-		...user_config,
+	const default_config = {
+		server: {
+			fs: {
+				strict: true
+			}
+		}
+	};
+
+	// don't warn on overriding defaults
+	const [modified_vite_config] = deep_merge(default_config, vite_config);
+
+	/** @type {[any, string[]]} */
+	const [merged_config, conflicts] = deep_merge(modified_vite_config, {
 		configFile: false,
 		root: cwd,
-		base,
+		base: assets_base,
 		build: {
-			...user_config.build,
 			lib: {
 				entry: service_worker_entry_file,
 				name: 'app',
 				formats: ['es']
 			},
 			rollupOptions: {
-				...(user_config.build && user_config.build.rollupOptions),
 				output: {
 					entryFileNames: 'service-worker.js'
 				}
@@ -523,16 +583,16 @@ async function build_service_worker(
 			emptyOutDir: false
 		},
 		resolve: {
-			...user_config.resolve,
 			alias: {
-				...(user_config.resolve && user_config.resolve.alias),
-				'$service-worker': path.resolve(`${build_dir}/runtime/service-worker`)
+				'$service-worker': path.resolve(`${build_dir}/runtime/service-worker`),
+				$lib: config.kit.files.lib
 			}
-		},
-		optimizeDeps: {
-			entries: []
 		}
 	});
+
+	print_config_conflicts(conflicts, 'kit.vite.', 'build_service_worker');
+
+	await vite.build(merged_config);
 }
 
 /** @param {string[]} array */

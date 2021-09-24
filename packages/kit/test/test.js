@@ -5,8 +5,8 @@ import fetch from 'node-fetch';
 import { chromium } from 'playwright-chromium';
 import { dev } from '../src/core/dev/index.js';
 import { build } from '../src/core/build/index.js';
-import { start } from '../src/core/start/index.js';
-import { load_config } from '../src/core/load_config/index.js';
+import { preview } from '../src/core/preview/index.js';
+import { load_config } from '../src/core/config/index.js';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { format } from 'util';
 
@@ -17,7 +17,7 @@ import { format } from 'util';
 async function setup({ port }) {
 	const base = `http://localhost:${port}`;
 
-	const browser = await chromium.launch();
+	const browser = await chromium.launch({ headless: true });
 
 	const contexts = {
 		js: await browser.newContext({ javaScriptEnabled: true }),
@@ -93,7 +93,7 @@ async function setup({ port }) {
 		pages,
 		/**
 		 * @param {import('node-fetch').RequestInfo} url
-		 * @param {import('node-fetch').RequestInit} opts
+		 * @param {import('node-fetch').RequestInit | undefined} opts
 		 */
 		fetch: (url, opts) => fetch(`${base}${url}`, opts),
 		capture_requests,
@@ -105,6 +105,12 @@ async function setup({ port }) {
 			 * @returns {Promise<void>}
 			 */
 			goto: (url) => pages.js.evaluate((url) => goto(url), url),
+
+			/**
+			 * @param {string} url
+			 * @returns {Promise<void>}
+			 */
+			invalidate: (url) => pages.js.evaluate((url) => invalidate(url), url),
 
 			/**
 			 * @param {string} url
@@ -159,10 +165,11 @@ function duplicate(test_fn, config, is_build) {
 			if (!dev) return;
 		}
 
-		if (process.env.FILTER && !name.includes(process.env.FILTER)) return;
-
 		if (nojs) {
-			test_fn(`${name} [no js]`, async (context) => {
+			const specific_name = `${name} [no js]`;
+			if (process.env.FILTER && !specific_name.includes(process.env.FILTER)) return;
+
+			test_fn(specific_name, async (context) => {
 				let response;
 
 				if (start) {
@@ -174,6 +181,7 @@ function duplicate(test_fn, config, is_build) {
 					page: context.pages.nojs,
 					clicknav: (selector) => context.pages.nojs.click(selector),
 					back: () => context.pages.nojs.goBack().then(() => void 0),
+					// @ts-expect-error
 					response,
 					js: false
 				});
@@ -181,7 +189,10 @@ function duplicate(test_fn, config, is_build) {
 		}
 
 		if (js && !config.kit.amp) {
-			test_fn(`${name} [js]`, async (context) => {
+			const specific_name = `${name} [js]`;
+			if (process.env.FILTER && !specific_name.includes(process.env.FILTER)) return;
+
+			test_fn(specific_name, async (context) => {
 				let response;
 
 				if (start) {
@@ -223,6 +234,7 @@ function duplicate(test_fn, config, is_build) {
 						await context.pages.js.evaluate(() => window.navigated);
 					},
 					js: true,
+					// @ts-expect-error
 					response
 				});
 			});
@@ -231,7 +243,7 @@ function duplicate(test_fn, config, is_build) {
 }
 
 async function main() {
-	// @ts-ignore
+	// @ts-expect-error
 	globalThis.UVU_DEFER = 1;
 	const uvu = await import('uvu');
 
@@ -249,9 +261,9 @@ async function main() {
 		const name = `dev:${app}`;
 
 		// manually replicate uvu global state
-		// @ts-ignore
+		// @ts-expect-error
 		const count = globalThis.UVU_QUEUE.push([name]);
-		// @ts-ignore
+		// @ts-expect-error
 		globalThis.UVU_INDEX = count - 1;
 
 		/** @type {import('uvu').Test<import('./types').TestContext>} */
@@ -263,7 +275,7 @@ async function main() {
 			try {
 				context.watcher = await dev({ cwd, port, config, host: undefined, https: false });
 				Object.assign(context, await setup({ port }));
-			} catch (e) {
+			} catch (/** @type {any} */ e) {
 				console.log(e.stack);
 				throw e;
 			}
@@ -284,9 +296,9 @@ async function main() {
 
 		/** @type {import('test').TestFunction} */
 		const test = Object.assign(duplicate(suite, config, false), {
-			// @ts-ignore
+			// @ts-expect-error
 			skip: duplicate(suite.skip, config, false),
-			// @ts-ignore
+			// @ts-expect-error
 			only: duplicate(suite.only, config, false)
 		});
 
@@ -307,9 +319,9 @@ async function main() {
 		const name = `build:${app}`;
 
 		// manually replicate uvu global state
-		// @ts-ignore
+		// @ts-expect-error
 		const count = globalThis.UVU_QUEUE.push([name]);
-		// @ts-ignore
+		// @ts-expect-error
 		globalThis.UVU_INDEX = count - 1;
 
 		/** @type {import('uvu').Test<import('./types').TestContext>} */
@@ -324,7 +336,7 @@ async function main() {
 					runtime: '../../../../../src/runtime/server/index.js'
 				});
 
-				context.server = await start({ port, config, cwd, host: undefined, https: false });
+				context.server = await preview({ port, config, cwd, host: undefined, https: false });
 				Object.assign(context, await setup({ port }));
 			} catch (e) {
 				// the try-catch is necessary pending https://github.com/lukeed/uvu/issues/80
@@ -348,9 +360,9 @@ async function main() {
 
 		/** @type {import('test').TestFunction} */
 		const test = Object.assign(duplicate(suite, config, true), {
-			// @ts-ignore
+			// @ts-expect-error
 			skip: duplicate(suite.skip, config, true),
-			// @ts-ignore
+			// @ts-expect-error
 			only: duplicate(suite.only, config, true)
 		});
 
@@ -364,7 +376,7 @@ async function main() {
 	for (const app of apps) {
 		const cwd = fileURLToPath(new URL(`apps/${app}`, import.meta.url));
 		const tests = await Promise.all(
-			glob('**/__tests__.js', { cwd }).map((file) => import(pathToFileURL(`${cwd}/${file}`).href))
+			glob('**/_tests.js', { cwd }).map((file) => import(pathToFileURL(`${cwd}/${file}`).href))
 		);
 
 		const config = await load_config({ cwd });

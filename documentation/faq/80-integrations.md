@@ -2,15 +2,41 @@
 question: How do I use X with SvelteKit?
 ---
 
-### How do I setup library X?
+Make sure you've read the [documentation section on integrations](/docs#additional-resources-integrations). If you're still having trouble, solutions to common issues are listed below.
 
-Please see [sveltejs/integrations](https://github.com/sveltejs/integrations#sveltekit) for examples of using many popular libraries like Tailwind, PostCSS, Firebase, GraphQL, mdsvex, and more.
+### How do I setup a database?
 
-### How do I use Babel, CoffeeScript, Less, PostCSS / SugarSS, Pug, scss/sass, Stylus, TypeScript, `global` styles, or replace?
+Put the code to query your database in [endpoints](/docs#routing-endpoints) - don't query the database in .svelte files. You can create a `db.js` or similar that sets up a connection immediately and makes the client accessible throughout the app as a singleton. You can execute any one-time setup code in `hooks.js` and import your database helpers into any endpoint that needs them.
 
-Adding [svelte-preprocess](https://github.com/sveltejs/svelte-preprocess) to your [`svelte.config.cjs`](#configuration) is the first step. For many of the tools listed above, you only need to install the corresponding library such as `npm install -D sass`or `npm install -D less`. See the svelte-preprocess docs for full details.
+### How do I use middleware?
 
-Also see [the examples above](#how-do-i-use-x-with-sveltekit-how-do-i-setup-library-x) of setting up these and similar libraries.
+`adapter-node` builds a middleware that you can use with your own server for production mode. In dev, you can add middleware to Vite by using a Vite plugin. For example:
+
+```js
+const myPlugin = {
+  name: 'log-request-middleware',
+  configureServer(server) {
+    server.middlewares.use((req, res, next) => {
+      console.log(`Got request ${req.url}`);
+      next();
+    })
+  }
+}
+
+/** @type {import('@sveltejs/kit').Config} */
+const config = {
+	kit: {
+		target: '#svelte',
+		vite: {
+			plugins: [ myPlugin ]
+		}
+	}
+};
+
+export default config;
+```
+
+See [Vite's `configureServer` docs](https://vitejs.dev/guide/api-plugin.html#configureserver) for more details including how to control ordering.
 
 ### How do I use a client-side only library that depends on `document` or `window`?
 
@@ -28,26 +54,40 @@ if (browser) {
 
 You can also run code in `onMount` if you'd like to run it after the component has been first rendered to the DOM:
 
-```html
-<script>
-	import { onMount } from 'svelte';
+```js
+import { onMount } from 'svelte';
 
-	let awkward;
-
-	onMount(async () => {
-		const module = await import('some-browser-only-library');
-		awkward = module.default;
-	});
-</script>
+onMount(async () => {
+	const { method } = await import('some-browser-only-library');
+	method('hello world');
+});
 ```
 
-### How do I setup a database?
+If the library you'd like to use is side-effect free you can also statically import it and it will be tree-shaken out in the server-side build where `onMount` will be automatically replaced with a no-op:
 
-Put the code to query your database in [endpoints](/docs#routing-endpoints) - don't query the database in .svelte files. You can create a `db.js` or similar that sets up a connection immediately and makes the client accessible throughout the app as a singleton. You can execute any one-time setup code in `hooks.js` and import your database helpers into any endpoint that needs them.
+```js
+import { onMount } from 'svelte';
+import { method } from 'some-browser-only-library';
 
-### How do I use Axios?
+onMount(() => {
+	method('hello world');
+});
+```
 
-You probably don't need it. We'd generally recommend you just use `fetch` instead. If you insist, you're probably better off using the ESM drop-in replacement `redaxios` [until axios utilizes ESM](https://github.com/axios/axios/issues/1879). Finally, if you still want to use Axios itself, try putting it in `optimizeDeps.include`.
+Otherwise, if the library has side effects and you'd still prefer to use static imports, check out [vite-plugin-iso-import](https://github.com/bluwy/vite-plugin-iso-import) to support the `?client` import suffix. The import will be stripped out in SSR builds. However, note that you will lose the ability to use VS Code Intellisense if you use this method.
+
+```js
+import { onMount } from 'svelte';
+import { method } from 'some-browser-only-library?client';
+
+onMount(() => {
+	method('hello world');
+});
+```
+
+### How do I use Firebase?
+
+Please use SDK v9 which provides a modular SDK approach that's currently in beta. The old versions are very difficult to get working especially with SSR and also resulted in a much larger client download size. Even with v9, most users need to set `kit.ssr: false` until [vite#4425](https://github.com/vitejs/vite/issues/4425) and [firebase-js-sdk#4846](https://github.com/firebase/firebase-js-sdk/issues/4846) are solved.
 
 ### Does it work with Yarn 2?
 

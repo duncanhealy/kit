@@ -1,12 +1,17 @@
 import commonjs from '@rollup/plugin-commonjs';
+import fs from 'fs';
 import replace from '@rollup/plugin-replace';
 import resolve from '@rollup/plugin-node-resolve';
 import pkg from './package.json';
 
+(fs.rmSync || fs.rmdirSync)('assets/runtime', { recursive: true, force: true });
+
 const external = [].concat(
 	Object.keys(pkg.dependencies || {}),
 	Object.keys(pkg.peerDependencies || {}),
-	Object.keys(process.binding('natives'))
+	Object.keys(process.binding('natives')),
+	'typescript',
+	'svelte2tsx'
 );
 
 export default [
@@ -42,7 +47,8 @@ export default [
 		input: {
 			cli: 'src/cli.js',
 			ssr: 'src/runtime/server/index.js',
-			http: 'src/core/http/index.js',
+			node: 'src/core/node/index.js',
+			hooks: 'src/runtime/hooks.js',
 			'install-fetch': 'src/install-fetch.js'
 		},
 		output: {
