@@ -1,10 +1,10 @@
 {
-	"$schema": "https://unpkg.com/@changesets/config@1.4.0/schema.json",
-	"changelog": "@changesets/cli/changelog",
+	"$schema": "https://unpkg.com/@changesets/config@2.3.0/schema.json",
+	"changelog": ["@svitejs/changesets-changelog-github-compact", { "repo": "sveltejs/kit" }],
 	"commit": false,
 	"linked": [],
-	"access": "restricted",
+	"access": "public",
 	"baseBranch": "master",
-	"updateInternalDependencies": "patch",
-	"ignore": ["hn.svelte.dev"]
+	"bumpVersionsWithWorkspaceProtocolOnly": true,
+	"ignore": ["!(@sveltejs/*|create-svelte|svelte-migrate)"]
 }

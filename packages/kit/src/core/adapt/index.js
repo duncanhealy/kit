@@ -1,20 +1,40 @@
 import colors from 'kleur';
-import { logger } from '../utils.js';
-import { get_utils } from './utils.js';
+import { create_builder } from './builder.js';
 
 /**
- * @param {import('types/config').ValidatedConfig} config
- * @param {import('types/internal').BuildData} build_data
- * @param {{ cwd?: string, verbose: boolean }} opts
+ * @param {import('types').ValidatedConfig} config
+ * @param {import('types').BuildData} build_data
+ * @param {import('types').ServerMetadata} server_metadata
+ * @param {import('types').Prerendered} prerendered
+ * @param {import('types').PrerenderMap} prerender_map
+ * @param {import('types').Logger} log
+ * @param {import('vite').ResolvedConfig} vite_config
  */
-export async function adapt(config, build_data, { cwd = process.cwd(), verbose }) {
+export async function adapt(
+	config,
+	build_data,
+	server_metadata,
+	prerendered,
+	prerender_map,
+	log,
+	vite_config
+) {
 	const { name, adapt } = config.kit.adapter;
 
 	console.log(colors.bold().cyan(`\n> Using ${name}`));
 
-	const log = logger({ verbose });
-	const utils = get_utils({ cwd, config, build_data, log });
-	await adapt(utils);
+	const builder = create_builder({
+		config,
+		build_data,
+		server_metadata,
+		route_data: build_data.manifest_data.routes.filter((route) => route.page || route.endpoint),
+		prerendered,
+		prerender_map,
+		log,
+		vite_config
+	});
+
+	await adapt(builder);
 
 	log.success('done');
 }

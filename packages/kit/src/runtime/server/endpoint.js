@@ -1,55 +1,94 @@
+import { ENDPOINT_METHODS, PAGE_METHODS } from '../../constants.js';
+import { negotiate } from '../../utils/http.js';
+import { Redirect } from '../control.js';
+import { method_not_allowed } from './utils.js';
+
 /**
- * @param {import('types/endpoint').ServerRequest} request
- * @param {import('types/internal').SSREndpoint} route
- * @returns {Promise<import('types/endpoint').ServerResponse>}
+ * @param {import('@sveltejs/kit').RequestEvent} event
+ * @param {import('types').SSREndpoint} mod
+ * @param {import('types').SSRState} state
+ * @returns {Promise<Response>}
  */
-export default async function render_route(request, route) {
-	const mod = await route.load();
+export async function render_endpoint(event, mod, state) {
+	const method = /** @type {import('types').HttpMethod} */ (event.request.method);
 
-	/** @type {import('types/endpoint').RequestHandler} */
-	const handler = mod[request.method.toLowerCase().replace('delete', 'del')]; // 'delete' is a reserved word
+	let handler = mod[method] || mod.fallback;
 
-	if (handler) {
-		const match = route.pattern.exec(request.path);
-		const params = route.params(match);
+	if (method === 'HEAD' && mod.GET && !mod.HEAD) {
+		handler = mod.GET;
+	}
 
-		const response = await handler({ ...request, params });
+	if (!handler) {
+		return method_not_allowed(mod, method);
+	}
 
-		if (response) {
-			if (typeof response !== 'object') {
-				return {
-					status: 500,
-					body: `Invalid response from route ${request.path}; 
-						 expected an object, got ${typeof response}`,
-					headers: {}
-				};
-			}
+	const prerender = mod.prerender ?? state.prerender_default;
 
-			let { status = 200, body, headers = {} } = response;
+	if (prerender && (mod.POST || mod.PATCH || mod.PUT || mod.DELETE)) {
+		throw new Error('Cannot prerender endpoints that have mutative methods');
+	}
 
-			headers = lowercase_keys(headers);
-
-			if (
-				(typeof body === 'object' && !('content-type' in headers)) ||
-				headers['content-type'] === 'application/json'
-			) {
-				headers = { ...headers, 'content-type': 'application/json' };
-				body = JSON.stringify(body);
-			}
-
-			return { status, body, headers };
+	if (state.prerendering && !prerender) {
+		if (state.depth > 0) {
+			// if request came from a prerendered page, bail
+			throw new Error(`${event.route.id} is not prerenderable`);
+		} else {
+			// if request came direct from the crawler, signal that
+			// this route cannot be prerendered, but don't bail
+			return new Response(undefined, { status: 204 });
 		}
+	}
+
+	try {
+		let response = await handler(
+			/** @type {import('@sveltejs/kit').RequestEvent<Record<string, any>>} */ (event)
+		);
+
+		if (!(response instanceof Response)) {
+			throw new Error(
+				`Invalid response from route ${event.url.pathname}: handler should return a Response object`
+			);
+		}
+
+		if (state.prerendering) {
+			// the returned Response might have immutable Headers
+			// so we should clone them before trying to mutate them
+			response = new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: new Headers(response.headers)
+			});
+			response.headers.set('x-sveltekit-prerender', String(prerender));
+		}
+
+		return response;
+	} catch (e) {
+		if (e instanceof Redirect) {
+			return new Response(undefined, {
+				status: e.status,
+				headers: { location: e.location }
+			});
+		}
+
+		throw e;
 	}
 }
 
-/** @param {Record<string, string>} obj */
-function lowercase_keys(obj) {
-	/** @type {Record<string, string>} */
-	const clone = {};
+/**
+ * @param {import('@sveltejs/kit').RequestEvent} event
+ */
+export function is_endpoint_request(event) {
+	const { method, headers } = event.request;
 
-	for (const key in obj) {
-		clone[key.toLowerCase()] = obj[key];
+	// These methods exist exclusively for endpoints
+	if (ENDPOINT_METHODS.includes(method) && !PAGE_METHODS.includes(method)) {
+		return true;
 	}
 
-	return clone;
+	// use:enhance uses a custom header to disambiguate
+	if (method === 'POST' && headers.get('x-sveltekit-action') === 'true') return false;
+
+	// GET/POST requests may be for endpoints or pages. We prefer endpoints if this isn't a text/html request
+	const accept = event.request.headers.get('accept') ?? '*/*';
+	return negotiate(accept, ['*', 'text/html']) !== 'text/html';
 }

@@ -1,4 +1,9 @@
 [build]
-  command = "npm run build"
-  publish = ".netlify/build/"
-  functions = ".netlify/functions/"
+  command = "npx pnpm install --store=node_modules/.pnpm-store && npx pnpm build -r"
+  publish = "build"
+
+[build.environment]
+  NPM_FLAGS = "--version" # this prevents npm install from happening
+
+[functions]
+  node_bundler = "esbuild"

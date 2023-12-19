@@ -1,57 +1,47 @@
-# READ THIS FIRST!
+[![Chat](https://img.shields.io/discord/457912077277855764?label=chat&logo=discord)](https://svelte.dev/chat)
 
-SvelteKit is still in beta. Expect bugs! Read more [here](https://svelte.dev/blog/sveltekit-beta), and track progress towards 1.0 [here](https://github.com/sveltejs/kit/issues?q=is%3Aopen+is%3Aissue+milestone%3A1.0).
+# SvelteKit
 
-## Documentation
+Web development, streamlined. Read the [documentation](https://kit.svelte.dev/docs) to get started.
 
-Please see [the documentation](https://kit.svelte.dev/docs) for information about getting started and developing with SvelteKit.
+### Packages
 
-## Developing
+| Package                                                                     | Changelog                                                     |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| [@sveltejs/kit](packages/kit)                                               | [Changelog](packages/kit/CHANGELOG.md)                        |
+| [@sveltejs/adapter-auto](packages/adapter-auto)                             | [Changelog](packages/adapter-auto/CHANGELOG.md)               |
+| [@sveltejs/adapter-cloudflare](packages/adapter-cloudflare)                 | [Changelog](packages/adapter-cloudflare/CHANGELOG.md)         |
+| [@sveltejs/adapter-cloudflare-workers](packages/adapter-cloudflare-workers) | [Changelog](packages/adapter-cloudflare-workers/CHANGELOG.md) |
+| [@sveltejs/adapter-netlify](packages/adapter-netlify)                       | [Changelog](packages/adapter-netlify/CHANGELOG.md)            |
+| [@sveltejs/adapter-node](packages/adapter-node)                             | [Changelog](packages/adapter-node/CHANGELOG.md)               |
+| [@sveltejs/adapter-static](packages/adapter-static)                         | [Changelog](packages/adapter-static/CHANGELOG.md)             |
+| [@sveltejs/adapter-vercel](packages/adapter-vercel)                         | [Changelog](packages/adapter-vercel/CHANGELOG.md)             |
+| [@sveltejs/amp](packages/amp)                                               | [Changelog](packages/amp/CHANGELOG.md)                        |
+| [@sveltejs/enhanced-img](packages/enhanced-img)                             | [Changelog](packages/enhanced-img/CHANGELOG.md)               |
+| [@sveltejs/package](packages/package)                                       | [Changelog](packages/package/CHANGELOG.md)                    |
+| [create-svelte](packages/create-svelte)                                     | [Changelog](packages/create-svelte/CHANGELOG.md)              |
+| [svelte-migrate](packages/migrate)                                          | [Changelog](packages/migrate/CHANGELOG.md)                    |
 
-This monorepo uses [pnpm](https://pnpm.js.org/en/). Install it...
+[Additional adapters](<(https://sveltesociety.dev/components#adapters)>) are maintained by the community.
 
-```bash
-npm i -g pnpm
-```
+## Bug reporting
 
-...then install this repo's dependencies...
+Please make sure the issue you're reporting involves SvelteKit. Many issues related to how a project builds originate from [Vite](https://vitejs.dev/), which is used to build a SvelteKit project. You can create a new Vite project with `npm create vite@latest` for client-side only repros and `npm create vite-extra@latest` for SSR or library repros.
 
-```bash
-pnpm i
-```
+If an issue originates from Vite, please report it in the [Vite issue tracker](https://github.com/vitejs/vite/issues).
 
-...then build SvelteKit and the other packages:
+## Contributing
 
-```bash
-pnpm build
-```
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for information on how to develop SvelteKit locally.
 
-You should now be able to run the [examples](examples) by navigating to one of the directories and doing `pnpm dev`.
+## Supporting Svelte
 
-Run `pnpm dev` inside the `packages/kit` directory to continually rebuild `@sveltejs/kit` as you make changes to SvelteKit. Restarting the example/test apps will cause the newly built version to be used.
+Svelte is an MIT-licensed open source project with its ongoing development made possible entirely by fantastic volunteers. If you'd like to support their efforts, please consider:
 
-To use the git hooks in the repo, which will save you waiting for CI to tell you that you forgot to lint, run this:
+- [Becoming a backer on Open Collective](https://opencollective.com/svelte).
 
-```bash
-git config core.hookspath .githooks
-```
+Funds donated via Open Collective will be used for compensating expenses related to Svelte's development such as hosting costs. If sufficient donations are received, funds may also be used to support Svelte's development more directly.
 
-### Changelogs
+## License
 
-For changes to be reflected in package changelogs, run `pnpx changeset` and follow the prompts.
-
-### Releases
-
-The [Changesets GitHub action](https://github.com/changesets/action#with-publishing) will create and update a PR that applies changesets and publishes new versions of changed packages to npm.
-
-> It uses `pnpm publish` rather than `pnpx changeset publish` so that we can use the `--filter` and (while in beta) `--tag` flags — though perhaps they work with `pnpx changeset publish`?
-
-New packages will need to be published manually the first time if they are scoped to the `@sveltejs` organisation, by running this from the package directory:
-
-```
-npm publish --access=public
-```
-
-### Testing
-
-Run `pnpm test` to run the tests from all subpackages. Browser tests live in subdirectories of `packages/kit/test` such as `packages/kit/test/apps/basics`. To run a single test, open up the file and change `test` to `test.only` for the relevant test.
+[MIT](https://github.com/sveltejs/kit/blob/master/LICENSE)

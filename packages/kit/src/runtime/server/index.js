@@ -1,100 +1,90 @@
-import render_page from './page/index.js';
-import { render_response } from './page/render.js';
-import render_endpoint from './endpoint.js';
-import { parse_body } from './parse_body/index.js';
+import { respond } from './respond.js';
+import { set_private_env, set_public_env, set_safe_public_env } from '../shared-server.js';
+import { options, get_hooks } from '__SERVER__/internal.js';
+import { DEV } from 'esm-env';
+import { filter_private_env, filter_public_env } from '../../utils/env.js';
+import { building } from '../app/environment.js';
 
-/**
- * @param {import('types/hooks').Incoming} incoming
- * @param {import('types/internal').SSRRenderOptions} options
- * @param {import('types/internal').SSRRenderState} [state]
- */
-export async function respond(incoming, options, state = {}) {
-	if (incoming.path.endsWith('/') && incoming.path !== '/') {
-		const q = incoming.query.toString();
+/** @type {ProxyHandler<{ type: 'public' | 'private' }>} */
+const prerender_env_handler = {
+	get({ type }, prop) {
+		throw new Error(
+			`Cannot read values from $env/dynamic/${type} while prerendering (attempted to read env.${prop.toString()}). Use $env/static/${type} instead`
+		);
+	}
+};
 
-		return {
-			status: 301,
-			headers: {
-				location: incoming.path.slice(0, -1) + (q ? `?${q}` : '')
-			}
-		};
+export class Server {
+	/** @type {import('types').SSROptions} */
+	#options;
+
+	/** @type {import('@sveltejs/kit').SSRManifest} */
+	#manifest;
+
+	/** @param {import('@sveltejs/kit').SSRManifest} manifest */
+	constructor(manifest) {
+		/** @type {import('types').SSROptions} */
+		this.#options = options;
+		this.#manifest = manifest;
 	}
 
-	const incoming_with_body = {
-		...incoming,
-		body: parse_body(incoming)
-	};
+	/**
+	 * @param {{
+	 *   env: Record<string, string>
+	 * }} opts
+	 */
+	async init({ env }) {
+		// Take care: Some adapters may have to call `Server.init` per-request to set env vars,
+		// so anything that shouldn't be rerun should be wrapped in an `if` block to make sure it hasn't
+		// been done already.
 
-	const context = (await options.hooks.getContext(incoming_with_body)) || {};
+		// set env, in case it's used in initialisation
+		const prefixes = {
+			public_prefix: this.#options.env_public_prefix,
+			private_prefix: this.#options.env_private_prefix
+		};
 
-	try {
-		return await options.hooks.handle({
-			request: {
-				...incoming_with_body,
-				params: null,
-				context
-			},
-			render: async (request) => {
-				if (state.prerender && state.prerender.fallback) {
-					return await render_response({
-						options,
-						$session: await options.hooks.getSession({ context }),
-						page_config: { ssr: false, router: true, hydrate: true },
-						status: 200,
-						error: null,
-						branch: [],
-						page: null
-					});
+		const private_env = filter_private_env(env, prefixes);
+		const public_env = filter_public_env(env, prefixes);
+
+		set_private_env(building ? new Proxy({ type: 'private' }, prerender_env_handler) : private_env);
+		set_public_env(building ? new Proxy({ type: 'public' }, prerender_env_handler) : public_env);
+		set_safe_public_env(public_env);
+
+		if (!this.#options.hooks) {
+			try {
+				const module = await get_hooks();
+
+				this.#options.hooks = {
+					handle: module.handle || (({ event, resolve }) => resolve(event)),
+					handleError: module.handleError || (({ error }) => console.error(error)),
+					handleFetch: module.handleFetch || (({ request, fetch }) => fetch(request))
+				};
+			} catch (error) {
+				if (DEV) {
+					this.#options.hooks = {
+						handle: () => {
+							throw error;
+						},
+						handleError: ({ error }) => console.error(error),
+						handleFetch: ({ request, fetch }) => fetch(request)
+					};
+				} else {
+					throw error;
 				}
-
-				for (const route of options.manifest.routes) {
-					if (!route.pattern.test(request.path)) continue;
-
-					const response =
-						route.type === 'endpoint'
-							? await render_endpoint(request, route)
-							: await render_page(request, route, options, state);
-
-					if (response) {
-						// inject ETags for 200 responses
-						if (response.status === 200) {
-							if (!/(no-store|immutable)/.test(response.headers['cache-control'])) {
-								const etag = `"${hash(response.body)}"`;
-
-								if (request.headers['if-none-match'] === etag) {
-									return {
-										status: 304,
-										headers: {},
-										body: null
-									};
-								}
-
-								response.headers['etag'] = etag;
-							}
-						}
-
-						return response;
-					}
-				}
-
-				return await render_page(request, null, options, state);
 			}
+		}
+	}
+
+	/**
+	 * @param {Request} request
+	 * @param {import('types').RequestOptions} options
+	 */
+	async respond(request, options) {
+		return respond(request, this.#options, this.#manifest, {
+			...options,
+			error: false,
+			depth: 0
 		});
-	} catch (e) {
-		options.handle_error(e);
-
-		return {
-			status: 500,
-			headers: {},
-			body: options.dev ? e.stack : e.message
-		};
 	}
-}
-
-/** @param {string} str */
-function hash(str) {
-	let hash = 5381,
-		i = str.length;
-	while (i) hash = (hash * 33) ^ str.charCodeAt(--i);
-	return (hash >>> 0).toString(36);
 }

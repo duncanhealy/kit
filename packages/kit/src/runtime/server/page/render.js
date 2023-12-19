@@ -1,206 +1,569 @@
-import devalue from 'devalue';
-import { writable } from 'svelte/store';
-
-const s = JSON.stringify;
+import * as devalue from 'devalue';
+import { readable, writable } from 'svelte/store';
+import { DEV } from 'esm-env';
+import * as paths from '__sveltekit/paths';
+import { hash } from '../../hash.js';
+import { serialize_data } from './serialize_data.js';
+import { s } from '../../../utils/misc.js';
+import { Csp } from './csp.js';
+import { uneval_action_response } from './actions.js';
+import { clarify_devalue_error, stringify_uses, handle_error_and_jsonify } from '../utils.js';
+import { public_env, safe_public_env } from '../../shared-server.js';
+import { text } from '../../../exports/index.js';
+import { create_async_iterator } from '../../../utils/streaming.js';
+import { SVELTE_KIT_ASSETS } from '../../../constants.js';
+import { SCHEME } from '../../../utils/url.js';
 
 // TODO rename this function/module
 
+const updated = {
+	...readable(false),
+	check: () => false
+};
+
+const encoder = new TextEncoder();
+
 /**
+ * Creates the HTML response.
  * @param {{
- *   options: import('types/internal').SSRRenderOptions;
- *   $session: any;
- *   page_config: { hydrate: boolean, router: boolean, ssr: boolean };
+ *   branch: Array<import('./types.js').Loaded>;
+ *   fetched: Array<import('./types.js').Fetched>;
+ *   options: import('types').SSROptions;
+ *   manifest: import('@sveltejs/kit').SSRManifest;
+ *   state: import('types').SSRState;
+ *   page_config: { ssr: boolean; csr: boolean };
  *   status: number;
- *   error: Error,
- *   branch: import('./types').Loaded[];
- *   page: import('types/page').Page
+ *   error: App.Error | null;
+ *   event: import('@sveltejs/kit').RequestEvent;
+ *   resolve_opts: import('types').RequiredResolveOptions;
+ *   action_result?: import('@sveltejs/kit').ActionResult;
  * }} opts
  */
 export async function render_response({
+	branch,
+	fetched,
 	options,
-	$session,
+	manifest,
+	state,
 	page_config,
 	status,
-	error,
-	branch,
-	page
+	error = null,
+	event,
+	resolve_opts,
+	action_result
 }) {
-	const css = new Set(options.entry.css);
-	const js = new Set(options.entry.js);
-	const styles = new Set();
+	if (state.prerendering) {
+		if (options.csp.mode === 'nonce') {
+			throw new Error('Cannot use prerendering if config.kit.csp.mode === "nonce"');
+		}
 
-	/** @type {Array<{ url: string, json: string }>} */
-	const serialized_data = [];
+		if (options.app_template_contains_nonce) {
+			throw new Error('Cannot use prerendering if page template contains %sveltekit.nonce%');
+		}
+	}
+
+	const { client } = manifest._;
+
+	const modulepreloads = new Set(client.imports);
+	const stylesheets = new Set(client.stylesheets);
+	const fonts = new Set(client.fonts);
+
+	/** @type {Set<string>} */
+	const link_header_preloads = new Set();
+
+	/** @type {Map<string, string>} */
+	// TODO if we add a client entry point one day, we will need to include inline_styles with the entry, otherwise stylesheets will be linked even if they are below inlineStyleThreshold
+	const inline_styles = new Map();
 
 	let rendered;
 
-	let is_private = false;
-	let maxage;
+	const form_value =
+		action_result?.type === 'success' || action_result?.type === 'failure'
+			? action_result.data ?? null
+			: null;
 
-	if (error) {
-		error.stack = options.get_stack(error);
+	/** @type {string} */
+	let base = paths.base;
+
+	/** @type {string} */
+	let assets = paths.assets;
+
+	/**
+	 * An expression that will evaluate in the client to determine the resolved base path.
+	 * We use a relative path when possible to support IPFS, the internet archive, etc.
+	 */
+	let base_expression = s(paths.base);
+
+	// if appropriate, use relative paths for greater portability
+	if (paths.relative && !state.prerendering?.fallback) {
+		const segments = event.url.pathname.slice(paths.base.length).split('/').slice(2);
+
+		base = segments.map(() => '..').join('/') || '.';
+
+		// resolve e.g. '../..' against current location, then remove trailing slash
+		base_expression = `new URL(${s(base)}, location).pathname.slice(0, -1)`;
+
+		if (!paths.assets || (paths.assets[0] === '/' && paths.assets !== SVELTE_KIT_ASSETS)) {
+			assets = base;
+		}
 	}
 
-	if (branch) {
-		branch.forEach(({ node, loaded, fetched, uses_credentials }) => {
-			if (node.css) node.css.forEach((url) => css.add(url));
-			if (node.js) node.js.forEach((url) => js.add(url));
-			if (node.styles) node.styles.forEach((content) => styles.add(content));
-
-			// TODO probably better if `fetched` wasn't populated unless `hydrate`
-			if (fetched && page_config.hydrate) serialized_data.push(...fetched);
-
-			if (uses_credentials) is_private = true;
-
-			maxage = loaded.maxage;
-		});
-
-		const session = writable($session);
+	if (page_config.ssr) {
+		if (__SVELTEKIT_DEV__ && !branch.at(-1)?.node.component) {
+			// Can only be the leaf, layouts have a fallback component generated
+			throw new Error(`Missing +page.svelte component for route ${event.route.id}`);
+		}
 
 		/** @type {Record<string, any>} */
 		const props = {
 			stores: {
 				page: writable(null),
 				navigating: writable(null),
-				session
+				updated
 			},
-			page,
-			components: branch.map(({ node }) => node.module.default)
+			constructors: await Promise.all(branch.map(({ node }) => node.component())),
+			form: form_value
 		};
+
+		let data = {};
 
 		// props_n (instead of props[n]) makes it easy to avoid
 		// unnecessary updates for layout components
 		for (let i = 0; i < branch.length; i += 1) {
-			props[`props_${i}`] = await branch[i].loaded.props;
+			data = { ...data, ...branch[i].data };
+			props[`data_${i}`] = data;
 		}
 
-		let session_tracking_active = false;
-		const unsubscribe = session.subscribe(() => {
-			if (session_tracking_active) is_private = true;
-		});
-		session_tracking_active = true;
+		props.page = {
+			error,
+			params: /** @type {Record<string, any>} */ (event.params),
+			route: event.route,
+			status,
+			url: event.url,
+			data,
+			form: form_value,
+			state: {}
+		};
 
-		try {
-			rendered = options.root.render(props);
-		} finally {
-			unsubscribe();
+		// use relative paths during rendering, so that the resulting HTML is as
+		// portable as possible, but reset afterwards
+		if (paths.relative) paths.override({ base, assets });
+
+		if (__SVELTEKIT_DEV__) {
+			const fetch = globalThis.fetch;
+			let warned = false;
+			globalThis.fetch = (info, init) => {
+				if (typeof info === 'string' && !SCHEME.test(info)) {
+					throw new Error(
+						`Cannot call \`fetch\` eagerly during server side rendering with relative URL (${info}) — put your \`fetch\` calls inside \`onMount\` or a \`load\` function instead`
+					);
+				} else if (!warned) {
+					console.warn(
+						'Avoid calling `fetch` eagerly during server side rendering — put your `fetch` calls inside `onMount` or a `load` function instead'
+					);
+					warned = true;
+				}
+
+				return fetch(info, init);
+			};
+
+			try {
+				rendered = options.root.render(props);
+			} finally {
+				globalThis.fetch = fetch;
+				paths.reset();
+			}
+		} else {
+			try {
+				rendered = options.root.render(props);
+			} finally {
+				paths.reset();
+			}
+		}
+
+		for (const { node } of branch) {
+			for (const url of node.imports) modulepreloads.add(url);
+			for (const url of node.stylesheets) stylesheets.add(url);
+			for (const url of node.fonts) fonts.add(url);
+
+			if (node.inline_styles) {
+				Object.entries(await node.inline_styles()).forEach(([k, v]) => inline_styles.set(k, v));
+			}
 		}
 	} else {
-		rendered = { head: '', html: '', css: '' };
+		rendered = { head: '', html: '', css: { code: '', map: null } };
 	}
 
-	const include_js = page_config.router || page_config.hydrate;
-	if (!include_js) js.clear();
+	let head = '';
+	let body = rendered.html;
 
-	// TODO strip the AMP stuff out of the build if not relevant
-	const links = options.amp
-		? styles.size > 0
-			? `<style amp-custom>${Array.from(styles).join('\n')}</style>`
-			: ''
-		: [
-				...Array.from(js).map((dep) => `<link rel="modulepreload" href="${dep}">`),
-				...Array.from(css).map((dep) => `<link rel="stylesheet" href="${dep}">`)
-		  ].join('\n\t\t');
+	const csp = new Csp(options.csp, {
+		prerender: !!state.prerendering
+	});
 
-	/** @type {string} */
-	let init = '';
+	/** @param {string} path */
+	const prefixed = (path) => {
+		if (path.startsWith('/')) {
+			// Vite makes the start script available through the base path and without it.
+			// We load it via the base path in order to support remote IDE environments which proxy
+			// all URLs under the base path during development.
+			return paths.base + path;
+		}
+		return `${assets}/${path}`;
+	};
 
-	if (options.amp) {
-		init = `
-		<style amp-boilerplate>body{-webkit-animation:-amp-start 8s steps(1,end) 0s 1 normal both;-moz-animation:-amp-start 8s steps(1,end) 0s 1 normal both;-ms-animation:-amp-start 8s steps(1,end) 0s 1 normal both;animation:-amp-start 8s steps(1,end) 0s 1 normal both}@-webkit-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@-moz-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@-ms-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@-o-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}</style>
-		<noscript><style amp-boilerplate>body{-webkit-animation:none;-moz-animation:none;-ms-animation:none;animation:none}</style></noscript>
-		<script async src="https://cdn.ampproject.org/v0.js"></script>`;
-	} else if (include_js) {
-		// prettier-ignore
-		init = `<script type="module">
-			import { start } from ${s(options.entry.file)};
-			start({
-				target: ${options.target ? `document.querySelector(${s(options.target)})` : 'document.body'},
-				paths: ${s(options.paths)},
-				session: ${try_serialize($session, (error) => {
-					throw new Error(`Failed to serialize session data: ${error.message}`);
-				})},
-				host: ${page && page.host ? s(page.host) : 'location.host'},
-				route: ${!!page_config.router},
-				spa: ${!page_config.ssr},
-				hydrate: ${page_config.ssr && page_config.hydrate? `{
-					status: ${status},
-					error: ${serialize_error(error)},
-					nodes: [
-						${branch
-						.map(({ node }) => `import(${s(node.entry)})`)
-						.join(',\n\t\t\t\t\t\t')}
-					],
-					page: {
-						host: ${page.host ? s(page.host) : 'location.host'}, // TODO this is redundant
-						path: ${s(page.path)},
-						query: new URLSearchParams(${s(page.query.toString())}),
-						params: ${s(page.params)}
-					}
-				}` : 'null'}
-			});
-		</script>`;
+	if (inline_styles.size > 0) {
+		const content = Array.from(inline_styles.values()).join('\n');
+
+		const attributes = __SVELTEKIT_DEV__ ? [' data-sveltekit'] : [];
+		if (csp.style_needs_nonce) attributes.push(` nonce="${csp.nonce}"`);
+
+		csp.add_style(content);
+
+		head += `\n\t<style${attributes.join('')}>${content}</style>`;
 	}
 
-	const head = [
-		rendered.head,
-		styles.size && !options.amp
-			? `<style data-svelte>${Array.from(styles).join('\n')}</style>`
-			: '',
-		links,
-		init
-	].join('\n\n\t\t');
+	for (const dep of stylesheets) {
+		const path = prefixed(dep);
 
-	const body = options.amp
-		? rendered.html
-		: `${rendered.html}
+		const attributes = ['rel="stylesheet"'];
 
-			${serialized_data
-				.map(({ url, json }) => `<script type="svelte-data" url="${url}">${json}</script>`)
-				.join('\n\n\t\t\t')}
-		`.replace(/^\t{2}/gm, '');
+		if (inline_styles.has(dep)) {
+			// don't load stylesheets that are already inlined
+			// include them in disabled state so that Vite can detect them and doesn't try to add them
+			attributes.push('disabled', 'media="(max-width: 0)"');
+		} else {
+			if (resolve_opts.preload({ type: 'css', path })) {
+				const preload_atts = ['rel="preload"', 'as="style"'];
+				link_header_preloads.add(`<${encodeURI(path)}>; ${preload_atts.join(';')}; nopush`);
+			}
+		}
 
-	/** @type {import('types/helper').Headers} */
-	const headers = {
+		head += `\n\t\t<link href="${path}" ${attributes.join(' ')}>`;
+	}
+
+	for (const dep of fonts) {
+		const path = prefixed(dep);
+
+		if (resolve_opts.preload({ type: 'font', path })) {
+			const ext = dep.slice(dep.lastIndexOf('.') + 1);
+			const attributes = [
+				'rel="preload"',
+				'as="font"',
+				`type="font/${ext}"`,
+				`href="${path}"`,
+				'crossorigin'
+			];
+
+			head += `\n\t\t<link ${attributes.join(' ')}>`;
+		}
+	}
+
+	const global = __SVELTEKIT_DEV__ ? '__sveltekit_dev' : `__sveltekit_${options.version_hash}`;
+
+	const { data, chunks } = get_data(
+		event,
+		options,
+		branch.map((b) => b.server_data),
+		global
+	);
+
+	if (page_config.ssr && page_config.csr) {
+		body += `\n\t\t\t${fetched
+			.map((item) =>
+				serialize_data(item, resolve_opts.filterSerializedResponseHeaders, !!state.prerendering)
+			)
+			.join('\n\t\t\t')}`;
+	}
+
+	if (page_config.csr) {
+		if (client.uses_env_dynamic_public && state.prerendering) {
+			modulepreloads.add(`${options.app_dir}/env.js`);
+		}
+
+		const included_modulepreloads = Array.from(modulepreloads, (dep) => prefixed(dep)).filter(
+			(path) => resolve_opts.preload({ type: 'js', path })
+		);
+
+		for (const path of included_modulepreloads) {
+			// see the kit.output.preloadStrategy option for details on why we have multiple options here
+			link_header_preloads.add(`<${encodeURI(path)}>; rel="modulepreload"; nopush`);
+			if (options.preload_strategy !== 'modulepreload') {
+				head += `\n\t\t<link rel="preload" as="script" crossorigin="anonymous" href="${path}">`;
+			} else if (state.prerendering) {
+				head += `\n\t\t<link rel="modulepreload" href="${path}">`;
+			}
+		}
+
+		const blocks = [];
+
+		const properties = [
+			paths.assets && `assets: ${s(paths.assets)}`,
+			`base: ${base_expression}`,
+			`env: ${!client.uses_env_dynamic_public || state.prerendering ? null : s(public_env)}`
+		].filter(Boolean);
+
+		if (chunks) {
+			blocks.push('const deferred = new Map();');
+
+			properties.push(`defer: (id) => new Promise((fulfil, reject) => {
+							deferred.set(id, { fulfil, reject });
+						})`);
+
+			properties.push(`resolve: ({ id, data, error }) => {
+							const { fulfil, reject } = deferred.get(id);
+							deferred.delete(id);
+
+							if (error) reject(error);
+							else fulfil(data);
+						}`);
+		}
+
+		blocks.push(`${global} = {
+						${properties.join(',\n\t\t\t\t\t\t')}
+					};`);
+
+		const args = ['app', 'element'];
+
+		blocks.push('const element = document.currentScript.parentElement;');
+
+		if (page_config.ssr) {
+			const serialized = { form: 'null', error: 'null' };
+
+			blocks.push(`const data = ${data};`);
+
+			if (form_value) {
+				serialized.form = uneval_action_response(
+					form_value,
+					/** @type {string} */ (event.route.id)
+				);
+			}
+
+			if (error) {
+				serialized.error = devalue.uneval(error);
+			}
+
+			const hydrate = [
+				`node_ids: [${branch.map(({ node }) => node.index).join(', ')}]`,
+				'data',
+				`form: ${serialized.form}`,
+				`error: ${serialized.error}`
+			];
+
+			if (status !== 200) {
+				hydrate.push(`status: ${status}`);
+			}
+
+			if (options.embedded) {
+				hydrate.push(`params: ${devalue.uneval(event.params)}`, `route: ${s(event.route)}`);
+			}
+
+			args.push(`{\n\t\t\t\t\t\t\t${hydrate.join(',\n\t\t\t\t\t\t\t')}\n\t\t\t\t\t\t}`);
+		}
+
+		blocks.push(`Promise.all([
+						import(${s(prefixed(client.start))}),
+						import(${s(prefixed(client.app))})
+					]).then(([kit, app]) => {
+						kit.start(${args.join(', ')});
+					});`);
+
+		if (options.service_worker) {
+			const opts = __SVELTEKIT_DEV__ ? ", { type: 'module' }" : '';
+
+			// we use an anonymous function instead of an arrow function to support
+			// older browsers (https://github.com/sveltejs/kit/pull/5417)
+			blocks.push(`if ('serviceWorker' in navigator) {
+						addEventListener('load', function () {
+							navigator.serviceWorker.register('${prefixed('service-worker.js')}'${opts});
+						});
+					}`);
+		}
+
+		const init_app = `
+				{
+					${blocks.join('\n\n\t\t\t\t\t')}
+				}
+			`;
+		csp.add_script(init_app);
+
+		body += `\n\t\t\t<script${
+			csp.script_needs_nonce ? ` nonce="${csp.nonce}"` : ''
+		}>${init_app}</script>\n\t\t`;
+	}
+
+	const headers = new Headers({
+		'x-sveltekit-page': 'true',
 		'content-type': 'text/html'
-	};
+	});
 
-	if (maxage) {
-		headers['cache-control'] = `${is_private ? 'private' : 'public'}, max-age=${maxage}`;
+	if (state.prerendering) {
+		// TODO read headers set with setHeaders and convert into http-equiv where possible
+		const http_equiv = [];
+
+		const csp_headers = csp.csp_provider.get_meta();
+		if (csp_headers) {
+			http_equiv.push(csp_headers);
+		}
+
+		if (state.prerendering.cache) {
+			http_equiv.push(`<meta http-equiv="cache-control" content="${state.prerendering.cache}">`);
+		}
+
+		if (http_equiv.length > 0) {
+			head = http_equiv.join('\n') + head;
+		}
+	} else {
+		const csp_header = csp.csp_provider.get_header();
+		if (csp_header) {
+			headers.set('content-security-policy', csp_header);
+		}
+		const report_only_header = csp.report_only_provider.get_header();
+		if (report_only_header) {
+			headers.set('content-security-policy-report-only', report_only_header);
+		}
+
+		if (link_header_preloads.size) {
+			headers.set('link', Array.from(link_header_preloads).join(', '));
+		}
 	}
 
-	return {
-		status,
-		headers,
-		body: options.template({ head, body })
-	};
+	// add the content after the script/css links so the link elements are parsed first
+	head += rendered.head;
+
+	const html = options.templates.app({
+		head,
+		body,
+		assets,
+		nonce: /** @type {string} */ (csp.nonce),
+		env: safe_public_env
+	});
+
+	// TODO flush chunks as early as we can
+	const transformed =
+		(await resolve_opts.transformPageChunk({
+			html,
+			done: true
+		})) || '';
+
+	if (!chunks) {
+		headers.set('etag', `"${hash(transformed)}"`);
+	}
+
+	if (DEV) {
+		if (page_config.csr) {
+			if (transformed.split('<!--').length < html.split('<!--').length) {
+				// the \u001B stuff is ANSI codes, so that we don't need to add a library to the runtime
+				// https://svelte.dev/repl/1b3f49696f0c44c881c34587f2537aa2
+				console.warn(
+					"\u001B[1m\u001B[31mRemoving comments in transformPageChunk can break Svelte's hydration\u001B[39m\u001B[22m"
+				);
+			}
+		} else {
+			if (chunks) {
+				console.warn(
+					'\u001B[1m\u001B[31mReturning promises from server `load` functions will only work if `csr === true`\u001B[39m\u001B[22m'
+				);
+			}
+		}
+	}
+
+	return !chunks
+		? text(transformed, {
+				status,
+				headers
+			})
+		: new Response(
+				new ReadableStream({
+					async start(controller) {
+						controller.enqueue(encoder.encode(transformed + '\n'));
+						for await (const chunk of chunks) {
+							controller.enqueue(encoder.encode(chunk));
+						}
+						controller.close();
+					},
+
+					type: 'bytes'
+				}),
+				{
+					headers: {
+						'content-type': 'text/html'
+					}
+				}
+			);
 }
 
 /**
- * @param {any} data
- * @param {(error: Error) => void} [fail]
+ * If the serialized data contains promises, `chunks` will be an
+ * async iterable containing their resolutions
+ * @param {import('@sveltejs/kit').RequestEvent} event
+ * @param {import('types').SSROptions} options
+ * @param {Array<import('types').ServerDataNode | null>} nodes
+ * @param {string} global
+ * @returns {{ data: string, chunks: AsyncIterable<string> | null }}
  */
-function try_serialize(data, fail) {
+function get_data(event, options, nodes, global) {
+	let promise_id = 1;
+	let count = 0;
+
+	const { iterator, push, done } = create_async_iterator();
+
+	/** @param {any} thing */
+	function replacer(thing) {
+		if (typeof thing?.then === 'function') {
+			const id = promise_id++;
+			count += 1;
+
+			thing
+				.then(/** @param {any} data */ (data) => ({ data }))
+				.catch(
+					/** @param {any} error */ async (error) => ({
+						error: await handle_error_and_jsonify(event, options, error)
+					})
+				)
+				.then(
+					/**
+					 * @param {{data: any; error: any}} result
+					 */
+					async ({ data, error }) => {
+						count -= 1;
+
+						let str;
+						try {
+							str = devalue.uneval({ id, data, error }, replacer);
+						} catch (e) {
+							error = await handle_error_and_jsonify(
+								event,
+								options,
+								new Error(`Failed to serialize promise while rendering ${event.route.id}`)
+							);
+							data = undefined;
+							str = devalue.uneval({ id, data, error }, replacer);
+						}
+
+						push(`<script>${global}.resolve(${str})</script>\n`);
+						if (count === 0) done();
+					}
+				);
+
+			return `${global}.defer(${id})`;
+		}
+	}
+
 	try {
-		return devalue(data);
-	} catch (err) {
-		if (fail) fail(err);
-		return null;
-	}
-}
+		const strings = nodes.map((node) => {
+			if (!node) return 'null';
 
-// Ensure we return something truthy so the client will not re-render the page over the error
+			return `{"type":"data","data":${devalue.uneval(node.data, replacer)},${stringify_uses(node)}${
+				node.slash ? `,"slash":${JSON.stringify(node.slash)}` : ''
+			}}`;
+		});
 
-/** @param {Error} error */
-function serialize_error(error) {
-	if (!error) return null;
-	let serialized = try_serialize(error);
-	if (!serialized) {
-		const { name, message, stack } = error;
-		serialized = try_serialize({ name, message, stack });
+		return {
+			data: `[${strings.join(',')}]`,
+			chunks: count > 0 ? iterator : null
+		};
+	} catch (e) {
+		throw new Error(clarify_devalue_error(event, /** @type {any} */ (e)));
 	}
-	if (!serialized) {
-		serialized = '{}';
-	}
-	return serialized;
 }

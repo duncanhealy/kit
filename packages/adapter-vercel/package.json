@@ -1,20 +1,47 @@
 {
 	"name": "@sveltejs/adapter-vercel",
-	"version": "1.0.0-next.14",
-	"main": "index.js",
+	"version": "4.0.2",
+	"description": "A SvelteKit adapter that creates a Vercel app",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/sveltejs/kit",
+		"directory": "packages/adapter-vercel"
+	},
+	"license": "MIT",
+	"homepage": "https://kit.svelte.dev",
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./index.d.ts",
+			"import": "./index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"types": "index.d.ts",
 	"files": [
-		"files"
+		"files",
+		"index.js",
+		"utils.js",
+		"index.d.ts"
 	],
 	"scripts": {
-		"lint": "eslint --ignore-path .gitignore \"**/*.{ts,js,svelte}\" && npm run check-format",
-		"format": "prettier --write . --config ../../.prettierrc --ignore-path .gitignore",
-		"check-format": "prettier --check . --config ../../.prettierrc --ignore-path .gitignore"
+		"lint": "prettier --check .",
+		"format": "pnpm lint --write",
+		"check": "tsc",
+		"test": "vitest run"
 	},
 	"dependencies": {
-		"@sveltejs/kit": "workspace:*",
-		"esbuild": "^0.11.12"
+		"@vercel/nft": "^0.26.0",
+		"esbuild": "^0.19.9"
 	},
 	"devDependencies": {
-		"typescript": "^4.2.3"
+		"@sveltejs/kit": "workspace:^",
+		"@sveltejs/vite-plugin-svelte": "^3.0.1",
+		"@types/node": "^18.19.3",
+		"typescript": "^5.3.3",
+		"vitest": "^1.0.4"
+	},
+	"peerDependencies": {
+		"@sveltejs/kit": "^2.0.0"
 	}
 }

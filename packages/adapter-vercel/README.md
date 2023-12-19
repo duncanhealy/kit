@@ -1,20 +1,11 @@
 # adapter-vercel
 
-Adapter for Svelte apps that creates a Vercel app, using a function for dynamic server rendering.
+A SvelteKit adapter that creates a Vercel app.
 
-## Usage
+## Docs
 
-Add `"@sveltejs/adapter-vercel": "next"` to the `devDependencies` in your `package.json` and run `npm install`.
+[Docs](https://kit.svelte.dev/docs/adapter-vercel)
 
-Then in your `svelte.config.js`:
+## Changelog
 
-```js
-const vercel = require('@sveltejs/adapter-vercel');
-
-module.exports = {
-	kit: {
-		...
-		adapter: vercel()
-	}
-};
-```
+[The Changelog for this package is available on GitHub](https://github.com/sveltejs/kit/blob/master/packages/adapter-vercel/CHANGELOG.md).

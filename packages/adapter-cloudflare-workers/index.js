@@ -1,97 +1,144 @@
-'use strict';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { posix, dirname } from 'node:path';
+import { execSync } from 'node:child_process';
+import esbuild from 'esbuild';
+import toml from '@iarna/toml';
+import { fileURLToPath } from 'node:url';
 
-const fs = require('fs');
-const { execSync } = require('child_process');
-const esbuild = require('esbuild');
-const toml = require('toml');
+/**
+ * @typedef {{
+ *   main: string;
+ *   site: {
+ *     bucket: string;
+ *   }
+ * }} WranglerConfig
+ */
 
-module.exports = function () {
-	/** @type {import('@sveltejs/kit').Adapter} */
-	const adapter = {
+/** @type {import('./index.js').default} */
+export default function ({ config = 'wrangler.toml' } = {}) {
+	return {
 		name: '@sveltejs/adapter-cloudflare-workers',
-		async adapt(utils) {
-			const { site } = validate_config(utils);
 
-			const bucket = site.bucket;
-			const entrypoint = site['entry-point'] || 'workers-site';
+		async adapt(builder) {
+			const { main, site } = validate_config(builder, config);
 
-			utils.rimraf(bucket);
-			utils.rimraf(entrypoint);
+			const files = fileURLToPath(new URL('./files', import.meta.url).href);
+			const tmp = builder.getBuildDirectory('cloudflare-workers-tmp');
 
-			utils.log.info('Installing worker dependencies...');
-			utils.copy(`${__dirname}/files/_package.json`, '.svelte/cloudflare-workers/package.json');
+			builder.rimraf(site.bucket);
+			builder.rimraf(dirname(main));
+
+			builder.log.info('Installing worker dependencies...');
+			builder.copy(`${files}/_package.json`, `${tmp}/package.json`);
 
 			// TODO would be cool if we could make this step unnecessary somehow
-			const stdout = execSync('npm install', { cwd: '.svelte/cloudflare-workers' });
-			utils.log.info(stdout.toString());
+			const stdout = execSync('npm install', { cwd: tmp });
+			builder.log.info(stdout.toString());
 
-			utils.log.minor('Generating worker...');
-			utils.copy(`${__dirname}/files/entry.js`, '.svelte/cloudflare-workers/entry.js');
+			builder.log.minor('Generating worker...');
+			const relativePath = posix.relative(tmp, builder.getServerDirectory());
+
+			builder.copy(`${files}/entry.js`, `${tmp}/entry.js`, {
+				replace: {
+					SERVER: `${relativePath}/index.js`,
+					MANIFEST: './manifest.js'
+				}
+			});
+
+			let prerendered_entries = Array.from(builder.prerendered.pages.entries());
+
+			if (builder.config.kit.paths.base) {
+				prerendered_entries = prerendered_entries.map(([path, { file }]) => [
+					path,
+					{ file: `${builder.config.kit.paths.base}/${file}` }
+				]);
+			}
+
+			writeFileSync(
+				`${tmp}/manifest.js`,
+				`export const manifest = ${builder.generateManifest({
+					relativePath
+				})};\n\nexport const prerendered = new Map(${JSON.stringify(prerendered_entries)});\n`
+			);
 
 			await esbuild.build({
-				entryPoints: ['.svelte/cloudflare-workers/entry.js'],
-				outfile: `${entrypoint}/index.js`,
+				platform: 'browser',
+				conditions: ['worker', 'browser'],
+				sourcemap: 'linked',
+				target: 'es2022',
+				entryPoints: [`${tmp}/entry.js`],
+				outfile: main,
 				bundle: true,
-				platform: 'node' // TODO would be great if we could generate ESM and use type = "javascript"
+				external: ['__STATIC_CONTENT_MANIFEST', 'cloudflare:*'],
+				format: 'esm',
+				loader: {
+					'.wasm': 'copy'
+				}
 			});
 
-			fs.writeFileSync(`${entrypoint}/package.json`, JSON.stringify({ main: 'index.js' }));
-
-			utils.log.info('Prerendering static pages...');
-			await utils.prerender({
-				dest: bucket
-			});
-
-			utils.log.minor('Copying assets...');
-			utils.copy_static_files(bucket);
-			utils.copy_client_files(bucket);
+			builder.log.minor('Copying assets...');
+			const bucket_dir = `${site.bucket}${builder.config.kit.paths.base}`;
+			builder.writeClient(bucket_dir);
+			builder.writePrerendered(bucket_dir);
 		}
 	};
+}
 
-	return adapter;
-};
-
-function validate_config(utils) {
-	if (fs.existsSync('wrangler.toml')) {
+/**
+ * @param {import('@sveltejs/kit').Builder} builder
+ * @param {string} config_file
+ * @returns {WranglerConfig}
+ */
+function validate_config(builder, config_file) {
+	if (existsSync(config_file)) {
+		/** @type {WranglerConfig} */
 		let wrangler_config;
 
 		try {
-			wrangler_config = toml.parse(fs.readFileSync('wrangler.toml', 'utf-8'));
+			wrangler_config = /** @type {WranglerConfig} */ (
+				toml.parse(readFileSync(config_file, 'utf-8'))
+			);
 		} catch (err) {
-			err.message = `Error parsing wrangler.toml: ${err.message}`;
+			err.message = `Error parsing ${config_file}: ${err.message}`;
 			throw err;
 		}
 
-		if (!wrangler_config.site || !wrangler_config.site.bucket) {
+		if (!wrangler_config.site?.bucket) {
 			throw new Error(
-				'You must specify site.bucket in wrangler.toml. Consult https://developers.cloudflare.com/workers/platform/sites/configuration'
+				`You must specify site.bucket in ${config_file}. Consult https://developers.cloudflare.com/workers/platform/sites/configuration`
+			);
+		}
+
+		if (!wrangler_config.main) {
+			throw new Error(
+				`You must specify main option in ${config_file}. Consult https://github.com/sveltejs/kit/tree/master/packages/adapter-cloudflare-workers`
 			);
 		}
 
 		return wrangler_config;
 	}
 
-	utils.log.error(
+	builder.log.error(
 		'Consult https://developers.cloudflare.com/workers/platform/sites/configuration on how to setup your site'
 	);
 
-	utils.log(
+	builder.log(
 		`
 		Sample wrangler.toml:
 
 		name = "<your-site-name>"
-		type = "javascript"
 		account_id = "<your-account-id>"
-		workers_dev = true
-		route = ""
-		zone_id = ""
 
-		[site]
-		bucket = "./.cloudflare/assets"
-		entry-point = "./.cloudflare/worker"`
+		main = "./.cloudflare/worker.js"
+		site.bucket = "./.cloudflare/public"
+
+		build.command = "npm run build"
+
+		compatibility_date = "2021-11-12"
+		workers_dev = true`
 			.replace(/^\t+/gm, '')
 			.trim()
 	);
 
-	throw new Error('Missing a wrangler.toml file');
+	throw new Error(`Missing a ${config_file} file`);
 }

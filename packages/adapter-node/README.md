@@ -1,5 +1,15 @@
-# adapter-node
+# @sveltejs/adapter-node
 
-Adapter for Svelte apps that builds a Node server — the equivalent of `sapper build`.
+[Adapter](https://kit.svelte.dev/docs/adapters) for SvelteKit apps that generates a standalone Node server.
 
-This is very experimental; the adapter API isn't at all fleshed out, and things will definitely change.
+## Docs
+
+[Docs](https://kit.svelte.dev/docs/adapter-node)
+
+## Changelog
+
+[The Changelog for this package is available on GitHub](https://github.com/sveltejs/kit/blob/master/packages/adapter-node/CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE)

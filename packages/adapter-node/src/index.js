@@ -1,15 +1,15 @@
-import { createServer } from './server';
-/*eslint import/no-unresolved: [2, { ignore: ['\.\/app\.js$'] }]*/
-import * as app from './app.js';
+import { handler } from 'HANDLER';
+import { env } from 'ENV';
+import polka from 'polka';
 
-const { PORT = 3000 } = process.env; // TODO configure via svelte.config.js
+export const path = env('SOCKET_PATH', false);
+export const host = env('HOST', '0.0.0.0');
+export const port = env('PORT', !path && '3000');
 
-const instance = createServer({ render: app.render }).listen(PORT, (err) => {
-	if (err) {
-		console.log('error', err);
-	} else {
-		console.log(`Listening on port ${PORT}`);
-	}
+const server = polka().use(handler);
+
+server.listen({ path, host, port }, () => {
+	console.log(`Listening on ${path ? path : host + ':' + port}`);
 });
 
-export { instance };
+export { server };
